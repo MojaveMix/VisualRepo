@@ -486,22 +486,28 @@ public class RepositoryAnalysisService {
 
     private int roleToTierIndex(String role) {
         return switch (role) {
-            case "UI_COMPONENT", "API_CLIENT" -> 0;
-            case "CONTROLLER" -> 1;
-            case "SERVICE" -> 2;
-            case "REPOSITORY", "CONFIG" -> 3;
-            case "MODEL" -> 4;
-            default -> 5;
+            case "UI_COMPONENT" -> 0;
+            case "API_CLIENT" -> 1;
+            case "CONTROLLER" -> 2;
+            case "SERVICE" -> 3;
+            case "REPOSITORY" -> 4;
+            case "MODEL" -> 5;
+            case "MODULE" -> 6;
+            case "CONFIG", "TEST" -> 7;
+            default -> 6;
         };
     }
 
     private String tierName(int tier) {
         return switch (tier) {
-            case 0 -> "Frontend / Client Layer";
-            case 1 -> "API / Controller Layer";
-            case 2 -> "Business Service Layer";
-            case 3 -> "Data Access & Config Layer";
-            case 4 -> "Domain Model & Entities";
+            case 0 -> "Frontend / UI Layer";
+            case 1 -> "Client & API Integration Layer";
+            case 2 -> "API / Controller Layer";
+            case 3 -> "Business Service Layer";
+            case 4 -> "Data Access Layer";
+            case 5 -> "Domain Model & Entities";
+            case 6 -> "Modules & Utilities";
+            case 7 -> "Configuration & Tests";
             default -> "Modules & Utilities";
         };
     }

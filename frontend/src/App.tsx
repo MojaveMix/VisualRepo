@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import {
   ReactFlow,
   Background,
@@ -22,6 +32,13 @@ import {
   Minimize2,
   Table2,
   Zap,
+  ArrowLeftRight,
+  RotateCcw,
+  PictureInPicture2,
+  ChevronLeft,
+  ChevronRight,
+  Minus,
+  Columns3,
 } from 'lucide-react';
 import { apiClient } from './api/client';
 import type {
@@ -46,17 +63,107 @@ import { CitedAiPanel } from './components/CitedAiPanel';
 import { IndexRepoDialog } from './components/IndexRepoDialog';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { MapLegend } from './components/MapLegend';
-import { PaneHeader } from './components/PaneHeader';
-import { getRoleMeta, relationLabel } from './lib/archMeta';
+import { PaneHeader, type PaneDragHandlers, type PaneId } from './components/PaneHeader';
+import { ThemeToggle } from './components/ThemeToggle';
+import { getRoleMeta, refineArchitecturalRole, relationLabel } from './lib/archMeta';
 import { computeImpactReport } from './lib/impactAnalysis';
-import { layoutGraph } from './lib/layout';
+import { archEdgeSides, layoutGraph } from './lib/layout';
+import { useTheme } from './lib/theme';
 
 const nodeTypes = {
   archNode: ArchitectureNode,
   lane: LaneNode,
 };
 
+const PANE_ORDER_KEY = 'visualrepo.paneOrder';
+const PANE_WIDTHS_KEY = 'visualrepo.paneWidths';
+const SIDE_BOXES_KEY = 'visualrepo.sideBoxes';
+const DEFAULT_PANE_ORDER: PaneId[] = ['map', 'code', 'ai'];
+const DEFAULT_PANE_WIDTHS: Record<PaneId, number> = {
+  map: 42,
+  code: 33,
+  ai: 25,
+};
+
+export type SideDockSide = 'left' | 'right';
+
+export interface SideBoxConfig {
+  side: SideDockSide;
+  minimized: boolean;
+}
+
+const PANE_LABELS: Record<PaneId, string> = {
+  map: 'Architecture & Impact',
+  code: 'Source code',
+  ai: 'Ask the AI',
+};
+
+function loadInitialSideBoxes(): Partial<Record<PaneId, SideBoxConfig>> {
+  try {
+    const raw = window.localStorage.getItem(SIDE_BOXES_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      const valid: Partial<Record<PaneId, SideBoxConfig>> = {};
+      for (const id of DEFAULT_PANE_ORDER) {
+        if (
+          parsed[id] &&
+          (parsed[id].side === 'left' || parsed[id].side === 'right') &&
+          typeof parsed[id].minimized === 'boolean'
+        ) {
+          valid[id] = parsed[id];
+        }
+      }
+      // Keep at least 1 panel in the main workspace
+      if (Object.keys(valid).length < 3) {
+        return valid;
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return {};
+}
+
+function loadInitialPaneOrder(): PaneId[] {
+  try {
+    const raw = window.localStorage.getItem(PANE_ORDER_KEY);
+    if (!raw) return DEFAULT_PANE_ORDER;
+    const parsed = JSON.parse(raw);
+    if (
+      Array.isArray(parsed) &&
+      parsed.length === 3 &&
+      DEFAULT_PANE_ORDER.every((id) => parsed.includes(id))
+    ) {
+      return parsed as PaneId[];
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return DEFAULT_PANE_ORDER;
+}
+
+function loadInitialPaneWidths(): Record<PaneId, number> {
+  try {
+    const raw = window.localStorage.getItem(PANE_WIDTHS_KEY);
+    if (!raw) return DEFAULT_PANE_WIDTHS;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed.map === 'number' &&
+      typeof parsed.code === 'number' &&
+      typeof parsed.ai === 'number'
+    ) {
+      return parsed;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return DEFAULT_PANE_WIDTHS;
+}
+
 export default function App() {
+  const { theme, isDark } = useTheme();
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [repos, setRepos] = useState<RepositorySummary[]>([]);
   const [currentRepo, setCurrentRepo] = useState<RepositorySummary | null>(null);
@@ -96,6 +203,334 @@ export default function App() {
   const [buildingEmbeddings, setBuildingEmbeddings] = useState(false);
   const [asking, setAsking] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+
+  // Editor-style draggable & resizable workspace panes + Side Boxes
+  const [paneOrder, setPaneOrder] = useState<PaneId[]>(loadInitialPaneOrder);
+  const [paneWidths, setPaneWidths] = useState<Record<PaneId, number>>(loadInitialPaneWidths);
+  const [sideBoxes, setSideBoxes] = useState<Partial<Record<PaneId, SideBoxConfig>>>(
+    loadInitialSideBoxes
+  );
+  const [draggingPane, setDraggingPane] = useState<PaneId | null>(null);
+  const [dragOverPane, setDragOverPane] = useState<PaneId | null>(null);
+  const [dragOverSideZone, setDragOverSideZone] = useState<SideDockSide | null>(null);
+  const [settledPanes, setSettledPanes] = useState<PaneId[]>([]);
+  const [activeResizer, setActiveResizer] = useState<number | null>(null);
+
+  const workspaceRef = useRef<HTMLElement | null>(null);
+  const paneRefs = useRef<Record<PaneId, HTMLElement | null>>({
+    map: null,
+    code: null,
+    ai: null,
+  });
+  const prevRectsRef = useRef<Partial<Record<PaneId, DOMRect>>>({});
+
+  const capturePaneRects = useCallback(() => {
+    const rects: Partial<Record<PaneId, DOMRect>> = {};
+    for (const id of DEFAULT_PANE_ORDER) {
+      const el = paneRefs.current[id];
+      if (el) rects[id] = el.getBoundingClientRect();
+    }
+    prevRectsRef.current = rects;
+  }, []);
+
+  // FLIP animation whenever paneOrder changes
+  useLayoutEffect(() => {
+    const prevRects = prevRectsRef.current;
+    const movedIds: PaneId[] = [];
+
+    for (const id of paneOrder) {
+      const el = paneRefs.current[id];
+      const prev = prevRects[id];
+      if (!el || !prev) continue;
+      const next = el.getBoundingClientRect();
+      const deltaX = prev.left - next.left;
+      if (Math.abs(deltaX) > 2) {
+        movedIds.push(id);
+        el.style.transition = 'none';
+        el.style.transform = `translate3d(${deltaX}px, 0, 0)`;
+        // Force layout reflow before playing the smooth cubic-bezier glide
+        void el.offsetWidth;
+        el.style.transition = 'transform 460ms cubic-bezier(0.22, 1, 0.36, 1)';
+        el.style.transform = 'translate3d(0, 0, 0)';
+      }
+    }
+
+    prevRectsRef.current = {};
+
+    if (movedIds.length > 0) {
+      setSettledPanes(movedIds);
+      const timer = window.setTimeout(() => {
+        for (const id of movedIds) {
+          const el = paneRefs.current[id];
+          if (el) {
+            el.style.transition = '';
+            el.style.transform = '';
+          }
+        }
+        setSettledPanes([]);
+      }, 680);
+      return () => window.clearTimeout(timer);
+    }
+  }, [paneOrder, sideBoxes]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PANE_ORDER_KEY, JSON.stringify(paneOrder));
+    } catch {
+      // ignore storage errors
+    }
+  }, [paneOrder]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PANE_WIDTHS_KEY, JSON.stringify(paneWidths));
+    } catch {
+      // ignore storage errors
+    }
+  }, [paneWidths]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDE_BOXES_KEY, JSON.stringify(sideBoxes));
+    } catch {
+      // ignore storage errors
+    }
+  }, [sideBoxes]);
+
+  const mainPanes = useMemo(
+    () => paneOrder.filter((id) => !sideBoxes[id]),
+    [paneOrder, sideBoxes]
+  );
+
+  const normalizedMainWidths = useMemo(() => {
+    const total = mainPanes.reduce((sum, id) => sum + (paneWidths[id] || 33), 0) || 100;
+    const map: Record<PaneId, number> = { ...paneWidths };
+    for (const id of mainPanes) {
+      map[id] = ((paneWidths[id] || 33) / total) * 100;
+    }
+    return map;
+  }, [mainPanes, paneWidths]);
+
+  const dockPaneToSideBox = useCallback(
+    (paneId: PaneId, side: SideDockSide) => {
+      // Ensure at least 1 panel remains in the main workspace
+      const remainingMain = paneOrder.filter((id) => id !== paneId && !sideBoxes[id]);
+      if (remainingMain.length === 0) return;
+      capturePaneRects();
+      setSideBoxes((prev) => ({
+        ...prev,
+        [paneId]: { side, minimized: false },
+      }));
+    },
+    [paneOrder, sideBoxes, capturePaneRects]
+  );
+
+  const undockSideBoxToMain = useCallback(
+    (paneId: PaneId, targetSlotPaneId?: PaneId) => {
+      capturePaneRects();
+      setSideBoxes((prev) => {
+        const next = { ...prev };
+        delete next[paneId];
+        return next;
+      });
+      if (targetSlotPaneId && targetSlotPaneId !== paneId) {
+        setPaneOrder((prev) => {
+          const filtered = prev.filter((id) => id !== paneId);
+          const tgtIdx = filtered.indexOf(targetSlotPaneId);
+          if (tgtIdx === -1) return prev;
+          filtered.splice(tgtIdx, 0, paneId);
+          return filtered;
+        });
+      }
+    },
+    [capturePaneRects]
+  );
+
+  const toggleSideBoxMinimized = useCallback((paneId: PaneId) => {
+    setSideBoxes((prev) => {
+      const current = prev[paneId];
+      if (!current) return prev;
+      return {
+        ...prev,
+        [paneId]: { ...current, minimized: !current.minimized },
+      };
+    });
+  }, []);
+
+  const flipSideBoxSide = useCallback((paneId: PaneId) => {
+    setSideBoxes((prev) => {
+      const current = prev[paneId];
+      if (!current) return prev;
+      return {
+        ...prev,
+        [paneId]: {
+          ...current,
+          side: current.side === 'left' ? 'right' : 'left',
+          minimized: false,
+        },
+      };
+    });
+  }, []);
+
+  const reorderPanes = useCallback(
+    (sourceId: PaneId, targetId: PaneId) => {
+      if (sourceId === targetId) return;
+      capturePaneRects();
+      // If source was in a side box and dropped onto a main pane, undock it into that slot!
+      if (sideBoxes[sourceId] && !sideBoxes[targetId]) {
+        undockSideBoxToMain(sourceId, targetId);
+        return;
+      }
+      setPaneOrder((prev) => {
+        const next = [...prev];
+        const srcIdx = next.indexOf(sourceId);
+        const tgtIdx = next.indexOf(targetId);
+        if (srcIdx === -1 || tgtIdx === -1) return prev;
+        next[srcIdx] = targetId;
+        next[tgtIdx] = sourceId;
+        return next;
+      });
+    },
+    [capturePaneRects, sideBoxes, undockSideBoxToMain]
+  );
+
+  const handleMovePaneByOffset = useCallback(
+    (paneId: PaneId, offset: -1 | 1) => {
+      const idx = mainPanes.indexOf(paneId);
+      const targetIdx = idx + offset;
+      if (idx === -1 || targetIdx < 0 || targetIdx >= mainPanes.length) return;
+      reorderPanes(paneId, mainPanes[targetIdx]);
+    },
+    [mainPanes, reorderPanes]
+  );
+
+  const handleResetLayout = useCallback(() => {
+    capturePaneRects();
+    setPaneOrder(DEFAULT_PANE_ORDER);
+    setPaneWidths(DEFAULT_PANE_WIDTHS);
+    setSideBoxes({});
+  }, [capturePaneRects]);
+
+  const isLayoutCustomized = useMemo(() => {
+    const orderChanged = paneOrder.some((id, idx) => id !== DEFAULT_PANE_ORDER[idx]);
+    const widthsChanged = DEFAULT_PANE_ORDER.some(
+      (id) => Math.abs(paneWidths[id] - DEFAULT_PANE_WIDTHS[id]) > 0.5
+    );
+    const hasSideBoxes = Object.keys(sideBoxes).length > 0;
+    return orderChanged || widthsChanged || hasSideBoxes;
+  }, [paneOrder, paneWidths, sideBoxes]);
+
+  const handlePaneDragStart = useCallback((e: DragEvent<HTMLElement>, paneId: PaneId) => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', paneId);
+    setDraggingPane(paneId);
+  }, []);
+
+  const handlePaneDragEnd = useCallback(() => {
+    setDraggingPane(null);
+    setDragOverPane(null);
+    setDragOverSideZone(null);
+  }, []);
+
+  const handlePaneDragOver = useCallback(
+    (e: DragEvent<HTMLElement>, targetPaneId: PaneId) => {
+      if (!draggingPane || draggingPane === targetPaneId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setDragOverSideZone(null);
+      if (dragOverPane !== targetPaneId) {
+        setDragOverPane(targetPaneId);
+      }
+    },
+    [draggingPane, dragOverPane]
+  );
+
+  const handlePaneDrop = useCallback(
+    (e: DragEvent<HTMLElement>, targetPaneId: PaneId) => {
+      e.preventDefault();
+      const sourceId = (draggingPane || e.dataTransfer.getData('text/plain')) as PaneId;
+      setDraggingPane(null);
+      setDragOverPane(null);
+      setDragOverSideZone(null);
+      if (sourceId && DEFAULT_PANE_ORDER.includes(sourceId) && sourceId !== targetPaneId) {
+        reorderPanes(sourceId, targetPaneId);
+      }
+    },
+    [draggingPane, reorderPanes]
+  );
+
+  const handleSideZoneDragOver = useCallback(
+    (e: DragEvent<HTMLDivElement>, side: SideDockSide) => {
+      if (!draggingPane) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'move';
+      setDragOverPane(null);
+      if (dragOverSideZone !== side) {
+        setDragOverSideZone(side);
+      }
+    },
+    [draggingPane, dragOverSideZone]
+  );
+
+  const handleSideZoneDrop = useCallback(
+    (e: DragEvent<HTMLDivElement>, side: SideDockSide) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const sourceId = (draggingPane || e.dataTransfer.getData('text/plain')) as PaneId;
+      setDraggingPane(null);
+      setDragOverPane(null);
+      setDragOverSideZone(null);
+      if (sourceId && DEFAULT_PANE_ORDER.includes(sourceId)) {
+        dockPaneToSideBox(sourceId, side);
+      }
+    },
+    [draggingPane, dockPaneToSideBox]
+  );
+
+  const startResizeSplit = useCallback(
+    (e: ReactMouseEvent<HTMLDivElement>, splitIdx: number) => {
+      e.preventDefault();
+      const container = workspaceRef.current;
+      if (!container) return;
+      const leftId = mainPanes[splitIdx];
+      const rightId = mainPanes[splitIdx + 1];
+      if (!leftId || !rightId) return;
+
+      const startX = e.clientX;
+      const totalWidth = container.getBoundingClientRect().width || 1;
+      const startLeftWidth = normalizedMainWidths[leftId];
+      const startRightWidth = normalizedMainWidths[rightId];
+      const combined = startLeftWidth + startRightWidth;
+      const minPct = 18;
+
+      setActiveResizer(splitIdx);
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const deltaPct = ((moveEvent.clientX - startX) / totalWidth) * 100;
+        const nextLeft = Math.min(
+          combined - minPct,
+          Math.max(minPct, startLeftWidth + deltaPct)
+        );
+        const nextRight = combined - nextLeft;
+        setPaneWidths((prev) => ({
+          ...prev,
+          [leftId]: Math.round(nextLeft * 10) / 10,
+          [rightId]: Math.round(nextRight * 10) / 10,
+        }));
+      };
+
+      const onMouseUp = () => {
+        setActiveResizer(null);
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    },
+    [mainPanes, normalizedMainWidths]
+  );
 
   const loadWorkspaceData = useCallback(async (repo: RepositorySummary) => {
     setErrorBanner(null);
@@ -367,7 +802,11 @@ export default function App() {
 
     const query = fileSearch.trim().toLowerCase();
     const visible = graphData.nodes
-      .filter((n) => roleFilter === 'ALL' || n.architecturalRole === roleFilter)
+      .filter(
+        (n) =>
+          roleFilter === 'ALL' ||
+          refineArchitecturalRole(n.path, n.architecturalRole, n.language) === roleFilter
+      )
       .filter(
         (n) =>
           !query ||
@@ -375,7 +814,7 @@ export default function App() {
           n.symbols.some((s) => s.toLowerCase().includes(query))
       );
 
-    const layout = layoutGraph(visible);
+    const layout = layoutGraph(visible, graphData.edges);
     const downHops = impactReport?.downstreamHops ?? new Map<string, number>();
     const upHops = impactReport?.upstreamHops ?? new Map<string, number>();
 
@@ -393,10 +832,12 @@ export default function App() {
 
     const laneNodes: Node[] = layout.lanes.map((lane) => {
       const data: LaneNodeData = {
+        step: lane.step,
         title: lane.title,
         subtitle: lane.subtitle,
         color: lane.color,
         count: lane.count,
+        roleBadges: lane.roleBadges,
         width: lane.width,
         height: lane.height,
       };
@@ -429,7 +870,7 @@ export default function App() {
         label: n.label,
         directory: n.directory,
         language: n.language,
-        architecturalRole: n.architecturalRole,
+        architecturalRole: refineArchitecturalRole(n.path, n.architecturalRole, n.language),
         tier: n.tier,
         lineCount: n.lineCount,
         symbols: n.symbols,
@@ -454,6 +895,15 @@ export default function App() {
     const edges: Edge[] = graphData.edges
       .filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target))
       .map((e) => {
+        const sourcePos = layout.positions.get(e.source) ?? { x: 0, y: 0 };
+        const targetPos = layout.positions.get(e.target) ?? { x: 0, y: 0 };
+        const { sourceSide, targetSide } = archEdgeSides(
+          sourcePos,
+          targetPos,
+          layout.rows.get(e.source) ?? 0,
+          layout.rows.get(e.target) ?? 0
+        );
+
         const isDirectOutgoing = e.source === selectedFilePath;
         const isDirectIncoming = e.target === selectedFilePath;
         const isDownstreamChain =
@@ -471,25 +921,46 @@ export default function App() {
 
         const color = isDownstreamChain
           ? isDirectIncoming
-            ? '#fb7185'
-            : '#f59e0b'
+            ? isDark
+              ? '#fb7185'
+              : '#e11d48'
+            : isDark
+            ? '#f59e0b'
+            : '#d97706'
           : isDirectIncoming
-          ? '#34d399'
+          ? isDark
+            ? '#34d399'
+            : '#059669'
           : isDirectOutgoing || isUpstreamChain
-          ? '#818cf8'
+          ? isDark
+            ? '#818cf8'
+            : '#4f46e5'
           : isApiCall
-          ? '#ec4899'
-          : '#475569';
+          ? isDark
+            ? '#ec4899'
+            : '#db2777'
+          : isDark
+          ? '#475569'
+          : '#94a3b8';
 
         return {
           id: e.id,
           source: e.source,
           target: e.target,
+          sourceHandle: `${sourceSide}-source`,
+          targetHandle: `${targetSide}-target`,
           type: 'smoothstep',
           label: isConnected ? relationLabel(e.relationType) : undefined,
           animated: isConnected,
-          labelStyle: { fill: '#e2e8f0', fontSize: 10, fontWeight: 600 },
-          labelBgStyle: { fill: '#0f172a', fillOpacity: 0.9 },
+          labelStyle: {
+            fill: isDark ? '#e2e8f0' : '#0f172a',
+            fontSize: 10,
+            fontWeight: 600,
+          },
+          labelBgStyle: {
+            fill: isDark ? '#0f172a' : '#ffffff',
+            fillOpacity: 0.92,
+          },
           labelBgPadding: [6, 3] as [number, number],
           labelBgBorderRadius: 4,
           style: {
@@ -512,6 +983,7 @@ export default function App() {
     impactReport,
     impactMode,
     citedFileMap,
+    isDark,
   ]);
 
   const visibleFileCount = useMemo(
@@ -521,7 +993,11 @@ export default function App() {
 
   const filteredFiles = useMemo(() => {
     return files
-      .filter((f) => roleFilter === 'ALL' || f.architecturalRole === roleFilter)
+      .filter(
+        (f) =>
+          roleFilter === 'ALL' ||
+          refineArchitecturalRole(f.path, f.architecturalRole, f.language) === roleFilter
+      )
       .filter(
         (f) =>
           !fileSearch.trim() ||
@@ -529,10 +1005,19 @@ export default function App() {
       );
   }, [files, roleFilter, fileSearch]);
 
-  const availableRoles = useMemo(() => {
-    if (!graphData) return [];
-    return Object.keys(graphData.roleCounts);
+  const refinedRoleCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    if (!graphData) return counts;
+    for (const n of graphData.nodes) {
+      const r = refineArchitecturalRole(n.path, n.architecturalRole, n.language);
+      counts[r] = (counts[r] ?? 0) + 1;
+    }
+    return counts;
   }, [graphData]);
+
+  const availableRoles = useMemo(() => {
+    return Object.keys(refinedRoleCounts);
+  }, [refinedRoleCounts]);
 
   const languages = useMemo(
     () => (graphData ? Object.keys(graphData.languageCounts) : []),
@@ -543,6 +1028,399 @@ export default function App() {
   const erRelationCount = erDiagram?.relations.length ?? 0;
 
   const showWelcome = !booting && repos.length === 0 && !currentRepo;
+
+  const canDropToSideBox =
+    draggingPane !== null && (mainPanes.length > 1 || Boolean(sideBoxes[draggingPane]));
+
+  const dockedSideEntries = useMemo(
+    () =>
+      paneOrder
+        .filter((id) => Boolean(sideBoxes[id]))
+        .map((id) => ({ paneId: id, config: sideBoxes[id]! })),
+    [paneOrder, sideBoxes]
+  );
+
+  const renderPaneContent = (
+    paneId: PaneId,
+    stepNumber: number,
+    dragHandlers?: PaneDragHandlers
+  ) => {
+    if (paneId === 'map') {
+      return (
+        <>
+          <PaneHeader
+            step={stepNumber}
+            title={leftView === 'er' ? 'Database ER diagram' : 'Architecture & Impact'}
+            subtitle={
+              leftView === 'er'
+                ? 'Tables, columns, primary/foreign keys and relationships'
+                : impactMode
+                ? 'Blast radius: highlighting every file affected if the selected file changes'
+                : 'Layers of the app and how its files depend on each other'
+            }
+            drag={dragHandlers}
+            actions={
+              leftView !== 'tree' ? (
+                <div className="flex items-center gap-1.5">
+                  {leftView === 'graph' && (
+                    <button
+                      onClick={() => setImpactMode((v) => !v)}
+                      className={`inline-flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition ${
+                        impactMode
+                          ? 'border-amber-400/60 bg-amber-500/20 text-amber-200'
+                          : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-500/50 hover:text-slate-100'
+                      }`}
+                      title="Toggle multi-hop Impact Analysis (blast radius) on the map"
+                    >
+                      <Zap className="h-3.5 w-3.5 text-amber-400" />
+                      Impact
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setGraphExpanded((v) => !v)}
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-indigo-500/60 hover:text-slate-100"
+                    title={
+                      graphExpanded
+                        ? 'Back to the three-panel view'
+                        : 'Make the diagram fill the screen'
+                    }
+                  >
+                    {graphExpanded ? (
+                      <Minimize2 className="h-3.5 w-3.5" />
+                    ) : (
+                      <Maximize2 className="h-3.5 w-3.5" />
+                    )}
+                    {graphExpanded ? 'Back to code' : 'Full screen'}
+                  </button>
+                </div>
+              ) : undefined
+            }
+          />
+
+          {/* Overview strip */}
+          {graphData && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-slate-800/80 bg-slate-900/40 px-4 py-1.5 text-[11px] text-slate-400">
+              {leftView === 'er' ? (
+                <>
+                  <span>
+                    <strong className="text-slate-200">{erTableCount}</strong> tables
+                  </span>
+                  <span>
+                    <strong className="text-slate-200">{erRelationCount}</strong> foreign-key
+                    relations
+                  </span>
+                  <span className="truncate">
+                    Click a table or column row to jump to its exact line in code
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>
+                    <strong className="text-slate-200">{graphData.nodes.length}</strong> files
+                  </span>
+                  <span>
+                    <strong className="text-slate-200">{graphData.edges.length}</strong> connections
+                  </span>
+                  <span className="truncate">
+                    Languages:{' '}
+                    <strong className="text-slate-200">{languages.join(', ') || '—'}</strong>
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Toolbar */}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-900/70 px-3 py-2">
+            <div className="flex rounded-lg border border-slate-800 bg-slate-950 p-0.5 text-[11px]">
+              <button
+                onClick={() => setLeftView('graph')}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium transition ${
+                  leftView === 'graph'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Network className="h-3.5 w-3.5" />
+                Map ({visibleFileCount})
+              </button>
+              <button
+                onClick={() => setLeftView('er')}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium transition ${
+                  leftView === 'er'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Entity-Relationship diagram of database tables"
+              >
+                <Table2 className="h-3.5 w-3.5" />
+                Database ER ({erTableCount})
+              </button>
+              <button
+                onClick={() => {
+                  setLeftView('tree');
+                  setGraphExpanded(false);
+                }}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium transition ${
+                  leftView === 'tree'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <FolderTree className="h-3.5 w-3.5" />
+                Files ({filteredFiles.length})
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+                <input
+                  type="text"
+                  value={fileSearch}
+                  onChange={(e) => setFileSearch(e.target.value)}
+                  placeholder={
+                    leftView === 'er' ? 'Find a table or column…' : 'Find a file or function…'
+                  }
+                  aria-label={
+                    leftView === 'er' ? 'Find a table or column' : 'Find a file or function'
+                  }
+                  className="w-40 rounded-lg border border-slate-800 bg-slate-950 py-1 pl-7 pr-2 text-xs text-slate-200 placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+              {leftView !== 'er' && (
+                <select
+                  value={roleFilter}
+                  onChange={(e) => setRoleFilter(e.target.value)}
+                  aria-label="Filter by file type"
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-300 focus:border-indigo-500 focus:outline-none"
+                >
+                  <option value="ALL">All types ({files.length})</option>
+                  {availableRoles.map((role) => (
+                    <option key={role} value={role}>
+                      {getRoleMeta(role).label} ({refinedRoleCounts[role]})
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          </div>
+
+          {/* Graph, ER diagram or file list */}
+          <div className="relative flex-1 overflow-hidden bg-slate-950">
+            {leftView === 'graph' ? (
+              <>
+                <MapLegend />
+                {visibleFileCount === 0 ? (
+                  <div className="flex h-full flex-col items-center justify-center p-6 text-center text-slate-400">
+                    <Network className="mb-2 h-8 w-8 text-slate-700" />
+                    <p className="text-sm font-medium text-slate-300">No files match your filter</p>
+                    <p className="mt-1 text-xs">Clear the search box or choose “All types”.</p>
+                  </div>
+                ) : (
+                  <ReactFlow
+                    key={`${currentRepo?.id}-${roleFilter}-${visibleFileCount}-${graphExpanded}`}
+                    colorMode={theme}
+                    nodes={flowNodes}
+                    edges={flowEdges}
+                    nodeTypes={nodeTypes}
+                    onNodeClick={(_, node) => {
+                      if (node.type === 'lane') return;
+                      handleNavigateToFile(node.id);
+                    }}
+                    nodesConnectable={false}
+                    fitView
+                    fitViewOptions={{ padding: 0.12 }}
+                    minZoom={0.15}
+                    maxZoom={1.6}
+                  >
+                    <Background color={isDark ? '#1e293b' : '#cbd5e1'} gap={22} />
+                    <Controls
+                      showInteractive={false}
+                      className="!border-slate-700 !bg-slate-900 !text-slate-200"
+                    />
+                    {graphExpanded && (
+                      <MiniMap
+                        nodeColor={(n) =>
+                          n.type === 'lane'
+                            ? 'transparent'
+                            : citedFileMap.has(n.id)
+                            ? '#10b981'
+                            : n.id === selectedFilePath
+                            ? '#6366f1'
+                            : isDark
+                            ? '#334155'
+                            : '#94a3b8'
+                        }
+                        maskColor={
+                          isDark ? 'rgba(2, 6, 23, 0.75)' : 'rgba(226, 232, 240, 0.75)'
+                        }
+                        className="!rounded-lg !border !border-slate-800 !bg-slate-900/90"
+                      />
+                    )}
+                  </ReactFlow>
+                )}
+              </>
+            ) : leftView === 'er' ? (
+              <ErDiagramView
+                diagram={erDiagram}
+                loaded={erLoaded}
+                query={fileSearch}
+                selectedEntityId={selectedEntityId}
+                highlightedColumn={highlightedColumn}
+                expanded={graphExpanded}
+                onSelectEntity={handleSelectEntity}
+                onSelectColumn={handleSelectColumn}
+              />
+            ) : (
+              <div className="h-full divide-y divide-slate-800/60 overflow-y-auto">
+                {filteredFiles.length === 0 && (
+                  <p className="p-6 text-center text-xs text-slate-500">
+                    No files match your filter.
+                  </p>
+                )}
+                {filteredFiles.map((f) => {
+                  const isSelected = f.path === selectedFilePath;
+                  const isCited = citedFileMap.has(f.path);
+                  const role = getRoleMeta(
+                    refineArchitecturalRole(f.path, f.architecturalRole, f.language)
+                  );
+                  const RoleIcon = role.icon;
+                  return (
+                    <button
+                      key={f.id}
+                      onClick={() => handleNavigateToFile(f.path)}
+                      className={`flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left transition ${
+                        isSelected
+                          ? 'border-l-4 border-indigo-400 bg-indigo-600/15'
+                          : 'border-l-4 border-transparent hover:bg-slate-900/70'
+                      }`}
+                    >
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <span
+                          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${role.iconBox}`}
+                        >
+                          <RoleIcon className="h-4 w-4" />
+                        </span>
+                        <div className="min-w-0">
+                          <span className="block truncate font-mono text-xs font-medium text-slate-200">
+                            {f.path}
+                          </span>
+                          <div className="mt-0.5 flex items-center gap-2 text-[10px] text-slate-400">
+                            <span
+                              className={`rounded border px-1.5 py-0.5 font-semibold ${role.badge}`}
+                            >
+                              {role.label}
+                            </span>
+                            <span>{f.language}</span>
+                            <span>{f.lineCount} lines</span>
+                            <span>{f.symbolCount} functions/classes</span>
+                          </div>
+                        </div>
+                      </div>
+                      {isCited && (
+                        <span className="inline-flex shrink-0 items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/20 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-300">
+                          <Sparkles className="h-2.5 w-2.5" />
+                          {citedFileMap.get(f.path)}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Bottom context card */}
+          {leftView === 'er' && selectedErEntity && erDiagram ? (
+            <ErEntitySummaryCard
+              entity={selectedErEntity}
+              diagram={erDiagram}
+              expanded={graphExpanded}
+              onSelectEntityById={(id) => {
+                const found = erDiagram.entities.find((e) => e.id === id);
+                if (found) handleSelectEntity(found);
+              }}
+              onExitExpanded={() => setGraphExpanded(false)}
+            />
+          ) : (
+            selectedGraphNode && (
+              <ImpactSummaryCard
+                node={selectedGraphNode}
+                impact={impactReport}
+                impactMode={impactMode}
+                graphExpanded={graphExpanded}
+                onToggleImpactMode={() => setImpactMode((v) => !v)}
+                onSelectFile={handleNavigateToFile}
+                onExitExpanded={() => setGraphExpanded(false)}
+              />
+            )
+          )}
+        </>
+      );
+    }
+
+    if (paneId === 'code') {
+      return (
+        <>
+          <PaneHeader
+            step={stepNumber}
+            title="Source code"
+            subtitle={
+              codeFullscreen
+                ? 'Full screen · press Esc to exit'
+                : 'The real file, with exact line numbers'
+            }
+            drag={codeFullscreen ? undefined : dragHandlers}
+            actions={
+              <button
+                onClick={() => setCodeFullscreen((v) => !v)}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-indigo-500/60 hover:text-slate-100"
+                title={
+                  codeFullscreen ? 'Exit full screen (Esc)' : 'View the code in full screen'
+                }
+              >
+                {codeFullscreen ? (
+                  <Minimize2 className="h-3.5 w-3.5" />
+                ) : (
+                  <Maximize2 className="h-3.5 w-3.5" />
+                )}
+                {codeFullscreen ? 'Exit full screen' : 'Full screen'}
+              </button>
+            }
+          />
+          <div className="min-h-0 flex-1">
+            <EvidenceInspector
+              fileDetail={fileDetail}
+              loading={loadingFile}
+              activeCitation={activeCitation}
+              highlightedRange={highlightedRange}
+              onSelectRange={(startLine, endLine, label, reason) =>
+                setHighlightedRange({ startLine, endLine, label, reason })
+              }
+              onNavigateToFile={handleNavigateToFile}
+            />
+          </div>
+        </>
+      );
+    }
+
+    return (
+      <CitedAiPanel
+        step={stepNumber}
+        drag={dragHandlers}
+        currentRepo={currentRepo}
+        systemStatus={systemStatus}
+        history={history}
+        asking={asking}
+        buildingEmbeddings={buildingEmbeddings}
+        activeCitation={activeCitation}
+        onAskQuestion={handleAskQuestion}
+        onBuildEmbeddings={handleBuildEmbeddings}
+        onSelectCitation={handleSelectCitation}
+      />
+    );
+  };
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-950 text-slate-100">
@@ -612,6 +1490,20 @@ export default function App() {
             </span>
           </div>
 
+          {!showWelcome && isLayoutCustomized && (
+            <button
+              type="button"
+              onClick={handleResetLayout}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-indigo-500/60 hover:text-slate-100"
+              title="Reset panels to default order (1. Architecture → 2. Source code → 3. Ask the AI), widths, and close Side Boxes"
+            >
+              <RotateCcw className="h-3.5 w-3.5 text-indigo-400" />
+              <span className="hidden sm:inline">Reset layout</span>
+            </button>
+          )}
+
+          <ThemeToggle />
+
           <button
             onClick={openIndexDialog}
             className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-600 to-cyan-600 px-3.5 py-2 text-xs font-semibold text-white shadow-lg shadow-indigo-900/30 transition hover:from-indigo-500 hover:to-cyan-500"
@@ -631,7 +1523,7 @@ export default function App() {
           </div>
           <button
             onClick={() => setErrorBanner(null)}
-            className="text-[11px] text-rose-300 underline hover:text-white"
+            className="text-[11px] text-rose-300 underline hover:text-slate-100"
           >
             Dismiss
           </button>
@@ -651,368 +1543,297 @@ export default function App() {
           githubTokenConfigured={systemStatus?.githubTokenConfigured}
         />
       ) : (
-        <main className="grid flex-1 grid-cols-12 overflow-hidden">
-          {/* LEFT PANE: Architecture map, Database ER diagram & file list */}
-          <section
-            className={`flex flex-col overflow-hidden border-r border-slate-800 ${
-              graphExpanded ? 'col-span-12' : 'col-span-5'
-            }`}
-          >
-            <PaneHeader
-              step={1}
-              title={leftView === 'er' ? 'Database ER diagram' : 'Architecture & Impact'}
-              subtitle={
-                leftView === 'er'
-                  ? 'Tables, columns, primary/foreign keys and relationships'
-                  : impactMode
-                  ? 'Blast radius: highlighting every file affected if the selected file changes'
-                  : 'Layers of the app and how its files depend on each other'
-              }
-              actions={
-                leftView !== 'tree' ? (
-                  <div className="flex items-center gap-1.5">
-                    {leftView === 'graph' && (
-                      <button
-                        onClick={() => setImpactMode((v) => !v)}
-                        className={`inline-flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition ${
-                          impactMode
-                            ? 'border-amber-400/60 bg-amber-500/20 text-amber-200'
-                            : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-500/50 hover:text-white'
-                        }`}
-                        title="Toggle multi-hop Impact Analysis (blast radius) on the map"
-                      >
-                        <Zap className="h-3.5 w-3.5 text-amber-400" />
-                        Impact
-                      </button>
+        <main ref={workspaceRef} className="relative flex flex-1 overflow-hidden">
+          {/* Left & Right Side Box Drop Zones when dragging a panel */}
+          {canDropToSideBox && (
+            <>
+              <div
+                onDragOver={(e) => handleSideZoneDragOver(e, 'left')}
+                onDragLeave={() => {
+                  if (dragOverSideZone === 'left') setDragOverSideZone(null);
+                }}
+                onDrop={(e) => handleSideZoneDrop(e, 'left')}
+                className={`vr-side-dropzone absolute bottom-3 left-2.5 top-3 z-50 flex w-28 flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-3 text-center ${
+                  dragOverSideZone === 'left' ? 'vr-side-dropzone-active' : ''
+                }`}
+              >
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-indigo-400/50 bg-indigo-500/20 text-indigo-300 shadow-lg">
+                  <PictureInPicture2 className="h-4 w-4" />
+                </div>
+                <span className="text-[11px] font-bold tracking-tight text-slate-100">
+                  Left Side Box
+                </span>
+                <span className="text-[10px] leading-tight text-slate-300">
+                  Drop{' '}
+                  <strong className="text-indigo-300">
+                    {draggingPane ? PANE_LABELS[draggingPane] : 'panel'}
+                  </strong>{' '}
+                  here to dock on left
+                </span>
+              </div>
+
+              <div
+                onDragOver={(e) => handleSideZoneDragOver(e, 'right')}
+                onDragLeave={() => {
+                  if (dragOverSideZone === 'right') setDragOverSideZone(null);
+                }}
+                onDrop={(e) => handleSideZoneDrop(e, 'right')}
+                className={`vr-side-dropzone absolute bottom-3 right-2.5 top-3 z-50 flex w-28 flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-3 text-center ${
+                  dragOverSideZone === 'right' ? 'vr-side-dropzone-active' : ''
+                }`}
+              >
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-indigo-400/50 bg-indigo-500/20 text-indigo-300 shadow-lg">
+                  <PictureInPicture2 className="h-4 w-4" />
+                </div>
+                <span className="text-[11px] font-bold tracking-tight text-slate-100">
+                  Right Side Box
+                </span>
+                <span className="text-[10px] leading-tight text-slate-300">
+                  Drop{' '}
+                  <strong className="text-indigo-300">
+                    {draggingPane ? PANE_LABELS[draggingPane] : 'panel'}
+                  </strong>{' '}
+                  here to dock on right
+                </span>
+              </div>
+            </>
+          )}
+
+          {/* Main Workspace Columns */}
+          {mainPanes.map((paneId, slotIdx) => {
+            const stepNumber = paneOrder.indexOf(paneId) + 1;
+            const isDraggingThis = draggingPane === paneId;
+            const isDropTarget = dragOverPane === paneId && draggingPane !== paneId;
+            const isSettled = settledPanes.includes(paneId);
+
+            const dragHandlers: PaneDragHandlers = {
+              paneId,
+              canMoveLeft: slotIdx > 0,
+              canMoveRight: slotIdx < mainPanes.length - 1,
+              canDockSide: mainPanes.length > 1,
+              isDragging: isDraggingThis,
+              onMoveLeft: () => handleMovePaneByOffset(paneId, -1),
+              onMoveRight: () => handleMovePaneByOffset(paneId, 1),
+              onDockSide: () =>
+                dockPaneToSideBox(paneId, slotIdx === 0 ? 'left' : 'right'),
+              onDragStart: handlePaneDragStart,
+              onDragEnd: handlePaneDragEnd,
+            };
+
+            const isHiddenByExpand = graphExpanded && paneId !== 'map';
+            const isFullWidthMap = graphExpanded && paneId === 'map';
+            const isFullscreenCode = codeFullscreen && paneId === 'code';
+
+            const sectionWidthStyle =
+              isFullscreenCode || isHiddenByExpand
+                ? undefined
+                : {
+                    width: isFullWidthMap
+                      ? '100%'
+                      : `${normalizedMainWidths[paneId]}%`,
+                  };
+
+            const dropOverlay = isDropTarget && draggingPane && (
+              <div className="vr-drop-overlay pointer-events-none absolute inset-2 z-30 flex items-center justify-center rounded-2xl border-2 border-dashed backdrop-blur-[2px]">
+                <div className="vr-drop-pill flex items-center gap-2 rounded-xl border border-indigo-400/60 bg-slate-900/95 px-4 py-2.5 text-xs font-semibold text-slate-100 shadow-2xl">
+                  <ArrowLeftRight className="h-4 w-4 text-indigo-400" />
+                  <span>
+                    {sideBoxes[draggingPane] ? (
+                      <>
+                        Restore <strong>{PANE_LABELS[draggingPane]}</strong> into main columns
+                      </>
+                    ) : (
+                      <>
+                        Swap <strong>{PANE_LABELS[draggingPane]}</strong> ⇄{' '}
+                        <strong>{PANE_LABELS[paneId]}</strong>
+                      </>
                     )}
+                  </span>
+                </div>
+              </div>
+            );
+
+            return (
+              <Fragment key={paneId}>
+                <section
+                  ref={(el) => {
+                    paneRefs.current[paneId] = el;
+                  }}
+                  style={sectionWidthStyle}
+                  onDragOver={(e) => handlePaneDragOver(e, paneId)}
+                  onDragLeave={() => {
+                    if (dragOverPane === paneId) setDragOverPane(null);
+                  }}
+                  onDrop={(e) => handlePaneDrop(e, paneId)}
+                  className={
+                    isFullscreenCode
+                      ? 'fixed inset-0 z-40 flex flex-col overflow-hidden bg-slate-950'
+                      : `vr-pane relative flex-col overflow-hidden border-r border-slate-800 ${
+                          isHiddenByExpand ? 'hidden' : 'flex'
+                        } ${isDraggingThis ? 'vr-pane-dragging' : ''} ${
+                          isSettled ? 'vr-pane-settled' : ''
+                        }`
+                  }
+                >
+                  {dropOverlay}
+                  {renderPaneContent(paneId, stepNumber, dragHandlers)}
+                </section>
+
+                {!graphExpanded && slotIdx < mainPanes.length - 1 && (
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize panels"
+                    title="Drag to resize panels · Double-click to reset widths"
+                    onMouseDown={(e) => startResizeSplit(e, slotIdx)}
+                    onDoubleClick={() => setPaneWidths(DEFAULT_PANE_WIDTHS)}
+                    className={`vr-pane-resizer ${
+                      activeResizer === slotIdx ? 'vr-pane-resizer-active' : ''
+                    }`}
+                  />
+                )}
+              </Fragment>
+            );
+          })}
+
+          {/* Docked Left / Right Side Boxes */}
+          {dockedSideEntries.map(({ paneId, config }) => {
+            const stepNumber = paneOrder.indexOf(paneId) + 1;
+            const isLeft = config.side === 'left';
+            const sameSideBeforeCount = dockedSideEntries
+              .filter((e) => e.config.side === config.side)
+              .findIndex((e) => e.paneId === paneId);
+
+            if (config.minimized) {
+              const topOffset = 16 + sameSideBeforeCount * 62;
+              return (
+                <div
+                  key={`sidebox-pill-${paneId}`}
+                  draggable
+                  onDragStart={(e) => handlePaneDragStart(e, paneId)}
+                  onDragEnd={handlePaneDragEnd}
+                  style={{ top: `${topOffset}px` }}
+                  className={`vr-sidebox-pill absolute z-40 flex items-center gap-2 rounded-2xl border border-indigo-500/50 bg-slate-900/95 px-3 py-2 text-xs text-slate-100 backdrop-blur-md transition hover:border-indigo-400 ${
+                    isLeft ? 'left-3' : 'right-3'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggleSideBoxMinimized(paneId)}
+                    className="flex items-center gap-2 text-left"
+                    title={`Expand ${PANE_LABELS[paneId]} Side Box`}
+                  >
+                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-500/25 text-[11px] font-bold text-indigo-300 ring-1 ring-indigo-500/40">
+                      {stepNumber}
+                    </span>
+                    <div>
+                      <div className="flex items-center gap-1.5 font-semibold text-slate-100">
+                        <PictureInPicture2 className="h-3.5 w-3.5 text-indigo-400" />
+                        <span>{PANE_LABELS[paneId]}</span>
+                      </div>
+                      <span className="block text-[10px] text-slate-400">
+                        {isLeft ? 'Left' : 'Right'} Side Box · Click to open
+                      </span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => undockSideBoxToMain(paneId)}
+                    className="ml-1 rounded-lg border border-slate-700 bg-slate-950/90 p-1.5 text-slate-300 transition hover:border-indigo-500/60 hover:text-slate-100"
+                    title="Restore back to main columns"
+                  >
+                    <Columns3 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              );
+            }
+
+            return (
+              <aside
+                key={`sidebox-${paneId}`}
+                style={
+                  sameSideBeforeCount > 0
+                    ? {
+                        transform: `translateY(${sameSideBeforeCount * 18}px)`,
+                      }
+                    : undefined
+                }
+                className={`absolute bottom-3 top-3 z-40 flex w-[430px] max-w-[46vw] flex-col overflow-hidden rounded-2xl border border-indigo-500/45 bg-slate-950/95 backdrop-blur-md ${
+                  isLeft ? 'vr-sidebox-left left-3' : 'vr-sidebox-right right-3'
+                }`}
+              >
+                {/* Side Box Control Bar (Draggable back to main columns or opposite side) */}
+                <div
+                  draggable
+                  onDragStart={(e) => handlePaneDragStart(e, paneId)}
+                  onDragEnd={handlePaneDragEnd}
+                  title="Drag this Side Box onto any main panel to restore it, or to the opposite edge to flip sides"
+                  className="flex cursor-grab items-center justify-between gap-2 border-b border-indigo-500/30 bg-gradient-to-r from-indigo-950/80 via-slate-900/95 to-slate-900/95 px-3 py-1.5 active:cursor-grabbing"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center gap-1 rounded-md border border-indigo-400/40 bg-indigo-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-indigo-200">
+                      <PictureInPicture2 className="h-3 w-3 text-indigo-300" />
+                      {isLeft ? 'Left Side Box' : 'Right Side Box'}
+                    </span>
+                    <span className="hidden text-[10px] text-slate-400 sm:inline">
+                      Drag to main columns or opposite side
+                    </span>
+                  </div>
+
+                  <div
+                    className="flex items-center gap-1"
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
                     <button
-                      onClick={() => setGraphExpanded((v) => !v)}
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-indigo-500/60 hover:text-white"
-                      title={graphExpanded ? 'Back to the three-panel view' : 'Make the diagram fill the screen'}
+                      type="button"
+                      onClick={() => flipSideBoxSide(paneId)}
+                      className="inline-flex items-center gap-1 rounded-md border border-slate-700/80 bg-slate-950/80 px-1.5 py-1 text-[10px] font-medium text-slate-300 transition hover:border-indigo-500/60 hover:text-slate-100"
+                      title={
+                        isLeft ? 'Move Side Box to the right side' : 'Move Side Box to the left side'
+                      }
                     >
-                      {graphExpanded ? (
-                        <Minimize2 className="h-3.5 w-3.5" />
+                      {isLeft ? (
+                        <>
+                          <span>Right</span>
+                          <ChevronRight className="h-3 w-3" />
+                        </>
                       ) : (
-                        <Maximize2 className="h-3.5 w-3.5" />
+                        <>
+                          <ChevronLeft className="h-3 w-3" />
+                          <span>Left</span>
+                        </>
                       )}
-                      {graphExpanded ? 'Back to code' : 'Full screen'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => toggleSideBoxMinimized(paneId)}
+                      className="inline-flex items-center justify-center rounded-md border border-slate-700/80 bg-slate-950/80 p-1 text-slate-300 transition hover:border-indigo-500/60 hover:text-slate-100"
+                      title="Minimize Side Box into a compact side pill"
+                    >
+                      <Minus className="h-3 w-3" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => undockSideBoxToMain(paneId)}
+                      className="inline-flex items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/15 px-2 py-1 text-[10px] font-semibold text-indigo-200 transition hover:border-indigo-400 hover:bg-indigo-500/25"
+                      title="Dock back into the main columns"
+                    >
+                      <Columns3 className="h-3 w-3" />
+                      <span>Dock back</span>
                     </button>
                   </div>
-                ) : undefined
-              }
-            />
-
-            {/* Overview strip */}
-            {graphData && (
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-slate-800/80 bg-slate-900/40 px-4 py-1.5 text-[11px] text-slate-400">
-                {leftView === 'er' ? (
-                  <>
-                    <span>
-                      <strong className="text-slate-200">{erTableCount}</strong> tables
-                    </span>
-                    <span>
-                      <strong className="text-slate-200">{erRelationCount}</strong> foreign-key relations
-                    </span>
-                    <span className="truncate">
-                      Click a table or column row to jump to its exact line in code
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span>
-                      <strong className="text-slate-200">{graphData.nodes.length}</strong> files
-                    </span>
-                    <span>
-                      <strong className="text-slate-200">{graphData.edges.length}</strong> connections
-                    </span>
-                    <span className="truncate">
-                      Languages: <strong className="text-slate-200">{languages.join(', ') || '—'}</strong>
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* Toolbar */}
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-900/70 px-3 py-2">
-              <div className="flex rounded-lg border border-slate-800 bg-slate-950 p-0.5 text-[11px]">
-                <button
-                  onClick={() => setLeftView('graph')}
-                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium transition ${
-                    leftView === 'graph'
-                      ? 'bg-indigo-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <Network className="h-3.5 w-3.5" />
-                  Map ({visibleFileCount})
-                </button>
-                <button
-                  onClick={() => setLeftView('er')}
-                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium transition ${
-                    leftView === 'er'
-                      ? 'bg-indigo-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Entity-Relationship diagram of database tables"
-                >
-                  <Table2 className="h-3.5 w-3.5" />
-                  Database ER ({erTableCount})
-                </button>
-                <button
-                  onClick={() => {
-                    setLeftView('tree');
-                    setGraphExpanded(false);
-                  }}
-                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium transition ${
-                    leftView === 'tree'
-                      ? 'bg-indigo-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <FolderTree className="h-3.5 w-3.5" />
-                  Files ({filteredFiles.length})
-                </button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-                  <input
-                    type="text"
-                    value={fileSearch}
-                    onChange={(e) => setFileSearch(e.target.value)}
-                    placeholder={
-                      leftView === 'er' ? 'Find a table or column…' : 'Find a file or function…'
-                    }
-                    aria-label={
-                      leftView === 'er' ? 'Find a table or column' : 'Find a file or function'
-                    }
-                    className="w-40 rounded-lg border border-slate-800 bg-slate-950 py-1 pl-7 pr-2 text-xs text-slate-200 placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
-                  />
                 </div>
-                {leftView !== 'er' && (
-                  <select
-                    value={roleFilter}
-                    onChange={(e) => setRoleFilter(e.target.value)}
-                    aria-label="Filter by file type"
-                    className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-300 focus:border-indigo-500 focus:outline-none"
-                  >
-                    <option value="ALL">All types ({files.length})</option>
-                    {availableRoles.map((role) => (
-                      <option key={role} value={role}>
-                        {getRoleMeta(role).label} ({graphData?.roleCounts[role]})
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </div>
 
-            {/* Graph, ER diagram or file list */}
-            <div className="relative flex-1 overflow-hidden bg-slate-950">
-              {leftView === 'graph' ? (
-                <>
-                  <MapLegend />
-                  {visibleFileCount === 0 ? (
-                    <div className="flex h-full flex-col items-center justify-center p-6 text-center text-slate-400">
-                      <Network className="mb-2 h-8 w-8 text-slate-700" />
-                      <p className="text-sm font-medium text-slate-300">No files match your filter</p>
-                      <p className="mt-1 text-xs">Clear the search box or choose “All types”.</p>
-                    </div>
-                  ) : (
-                    <ReactFlow
-                      key={`${currentRepo?.id}-${roleFilter}-${visibleFileCount}-${graphExpanded}`}
-                      nodes={flowNodes}
-                      edges={flowEdges}
-                      nodeTypes={nodeTypes}
-                      onNodeClick={(_, node) => {
-                        if (node.type === 'lane') return;
-                        handleNavigateToFile(node.id);
-                      }}
-                      nodesConnectable={false}
-                      fitView
-                      fitViewOptions={{ padding: 0.12 }}
-                      minZoom={0.15}
-                      maxZoom={1.6}
-                    >
-                      <Background color="#1e293b" gap={22} />
-                      <Controls
-                        showInteractive={false}
-                        className="!border-slate-700 !bg-slate-900 !text-slate-200"
-                      />
-                      {graphExpanded && (
-                        <MiniMap
-                          nodeColor={(n) =>
-                            n.type === 'lane'
-                              ? 'transparent'
-                              : citedFileMap.has(n.id)
-                              ? '#10b981'
-                              : n.id === selectedFilePath
-                              ? '#6366f1'
-                              : '#334155'
-                          }
-                          maskColor="rgba(2, 6, 23, 0.75)"
-                          className="!rounded-lg !border !border-slate-800 !bg-slate-900/90"
-                        />
-                      )}
-                    </ReactFlow>
-                  )}
-                </>
-              ) : leftView === 'er' ? (
-                <ErDiagramView
-                  diagram={erDiagram}
-                  loaded={erLoaded}
-                  query={fileSearch}
-                  selectedEntityId={selectedEntityId}
-                  highlightedColumn={highlightedColumn}
-                  expanded={graphExpanded}
-                  onSelectEntity={handleSelectEntity}
-                  onSelectColumn={handleSelectColumn}
-                />
-              ) : (
-                <div className="h-full divide-y divide-slate-800/60 overflow-y-auto">
-                  {filteredFiles.length === 0 && (
-                    <p className="p-6 text-center text-xs text-slate-500">No files match your filter.</p>
-                  )}
-                  {filteredFiles.map((f) => {
-                    const isSelected = f.path === selectedFilePath;
-                    const isCited = citedFileMap.has(f.path);
-                    const role = getRoleMeta(f.architecturalRole);
-                    const RoleIcon = role.icon;
-                    return (
-                      <button
-                        key={f.id}
-                        onClick={() => handleNavigateToFile(f.path)}
-                        className={`flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left transition ${
-                          isSelected
-                            ? 'border-l-4 border-indigo-400 bg-indigo-600/15'
-                            : 'border-l-4 border-transparent hover:bg-slate-900/70'
-                        }`}
-                      >
-                        <div className="flex min-w-0 items-center gap-2.5">
-                          <span
-                            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${role.iconBox}`}
-                          >
-                            <RoleIcon className="h-4 w-4" />
-                          </span>
-                          <div className="min-w-0">
-                            <span className="block truncate font-mono text-xs font-medium text-slate-200">
-                              {f.path}
-                            </span>
-                            <div className="mt-0.5 flex items-center gap-2 text-[10px] text-slate-400">
-                              <span className={`rounded border px-1.5 py-0.5 font-semibold ${role.badge}`}>
-                                {role.label}
-                              </span>
-                              <span>{f.language}</span>
-                              <span>{f.lineCount} lines</span>
-                              <span>{f.symbolCount} functions/classes</span>
-                            </div>
-                          </div>
-                        </div>
-                        {isCited && (
-                          <span className="inline-flex shrink-0 items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/20 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-300">
-                            <Sparkles className="h-2.5 w-2.5" />
-                            {citedFileMap.get(f.path)}
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
+                {/* Live Panel Content inside Side Box */}
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  {renderPaneContent(paneId, stepNumber, undefined)}
                 </div>
-              )}
-            </div>
-
-            {/* Bottom context card: ER table details in ER mode, or File + Impact Analysis in Map/Files mode */}
-            {leftView === 'er' && selectedErEntity && erDiagram ? (
-              <ErEntitySummaryCard
-                entity={selectedErEntity}
-                diagram={erDiagram}
-                expanded={graphExpanded}
-                onSelectEntityById={(id) => {
-                  const found = erDiagram.entities.find((e) => e.id === id);
-                  if (found) handleSelectEntity(found);
-                }}
-                onExitExpanded={() => setGraphExpanded(false)}
-              />
-            ) : (
-              selectedGraphNode && (
-                <ImpactSummaryCard
-                  node={selectedGraphNode}
-                  impact={impactReport}
-                  impactMode={impactMode}
-                  graphExpanded={graphExpanded}
-                  onToggleImpactMode={() => setImpactMode((v) => !v)}
-                  onSelectFile={handleNavigateToFile}
-                  onExitExpanded={() => setGraphExpanded(false)}
-                />
-              )
-            )}
-          </section>
-
-          {/* CENTER PANE: Source code & line-range evidence */}
-          <section
-            className={
-              codeFullscreen
-                ? 'fixed inset-0 z-40 flex flex-col overflow-hidden bg-slate-950'
-                : `col-span-4 flex-col overflow-hidden border-r border-slate-800 ${
-                    graphExpanded ? 'hidden' : 'flex'
-                  }`
-            }
-          >
-            <PaneHeader
-              step={2}
-              title="Source code"
-              subtitle={
-                codeFullscreen
-                  ? 'Full screen · press Esc to exit'
-                  : 'The real file, with exact line numbers'
-              }
-              actions={
-                <button
-                  onClick={() => setCodeFullscreen((v) => !v)}
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-indigo-500/60 hover:text-white"
-                  title={codeFullscreen ? 'Exit full screen (Esc)' : 'View the code in full screen'}
-                >
-                  {codeFullscreen ? (
-                    <Minimize2 className="h-3.5 w-3.5" />
-                  ) : (
-                    <Maximize2 className="h-3.5 w-3.5" />
-                  )}
-                  {codeFullscreen ? 'Exit full screen' : 'Full screen'}
-                </button>
-              }
-            />
-            <div className="min-h-0 flex-1">
-              <EvidenceInspector
-                fileDetail={fileDetail}
-                loading={loadingFile}
-                activeCitation={activeCitation}
-                highlightedRange={highlightedRange}
-                onSelectRange={(startLine, endLine, label, reason) =>
-                  setHighlightedRange({ startLine, endLine, label, reason })
-                }
-                onNavigateToFile={handleNavigateToFile}
-              />
-            </div>
-          </section>
-
-          {/* RIGHT PANE: Cited AI assistant */}
-          <section
-            className={`col-span-3 flex-col overflow-hidden ${graphExpanded ? 'hidden' : 'flex'}`}
-          >
-            <CitedAiPanel
-              currentRepo={currentRepo}
-              systemStatus={systemStatus}
-              history={history}
-              asking={asking}
-              buildingEmbeddings={buildingEmbeddings}
-              activeCitation={activeCitation}
-              onAskQuestion={handleAskQuestion}
-              onBuildEmbeddings={handleBuildEmbeddings}
-              onSelectCitation={handleSelectCitation}
-            />
-          </section>
+              </aside>
+            );
+          })}
         </main>
       )}
 

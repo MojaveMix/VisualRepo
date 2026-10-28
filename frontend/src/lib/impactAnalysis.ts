@@ -1,5 +1,10 @@
 import type { ArchitectureGraph, GraphNodeDto } from '../types/api';
-import { getLayerMeta, getRoleMeta } from './archMeta';
+import {
+  getLayerMeta,
+  getRoleMeta,
+  refineArchitecturalRole,
+  resolveNodeLayerKey,
+} from './archMeta';
 
 export interface ImpactNode {
   path: string;
@@ -92,12 +97,17 @@ export function computeImpactReport(
     for (const [path, hops] of hopsMap.entries()) {
       const node = nodeByPath.get(path);
       if (!node) continue;
-      const roleMeta = getRoleMeta(node.architecturalRole);
-      const layerMeta = getLayerMeta(node.tier);
+      const effectiveRole = refineArchitecturalRole(
+        node.path,
+        node.architecturalRole,
+        node.language
+      );
+      const roleMeta = getRoleMeta(effectiveRole);
+      const layerMeta = getLayerMeta(resolveNodeLayerKey(node));
       list.push({
         path,
         label: node.label,
-        role: node.architecturalRole,
+        role: effectiveRole,
         roleLabel: roleMeta.label,
         layerTitle: layerMeta.title,
         hops,

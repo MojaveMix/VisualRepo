@@ -1,9 +1,16 @@
 import { createHighlighterCore, type HighlighterCore, type ThemedToken } from 'shiki/core';
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript';
+import type { ThemeMode } from './theme';
 
-/** VS Code's default dark theme ("Dark+"). */
+/** VS Code's default dark and light themes ("Dark+" and "Light+"). */
 export const CODE_THEME = 'dark-plus';
-export const EDITOR_BACKGROUND = '#1e1e1e';
+export const LIGHT_CODE_THEME = 'light-plus';
+export const EDITOR_BACKGROUND = '#0d1322';
+export const LIGHT_EDITOR_BACKGROUND = '#fbfcfe';
+
+export function getEditorBackground(theme: ThemeMode): string {
+  return theme === 'light' ? LIGHT_EDITOR_BACKGROUND : EDITOR_BACKGROUND;
+}
 
 const LANGUAGE_LOADERS = {
   java: () => import('shiki/langs/java.mjs'),
@@ -76,7 +83,7 @@ const loadedLangs = new Set<SupportedLang>();
 function getHighlighter(): Promise<HighlighterCore> {
   if (!highlighterPromise) {
     highlighterPromise = createHighlighterCore({
-      themes: [import('shiki/themes/dark-plus.mjs')],
+      themes: [import('shiki/themes/dark-plus.mjs'), import('shiki/themes/light-plus.mjs')],
       langs: [],
       engine: createJavaScriptRegexEngine(),
     });
@@ -90,10 +97,14 @@ export interface HighlightedFile {
 }
 
 /**
- * Tokenizes the whole file with the VS Code Dark+ theme.
+ * Tokenizes the whole file with the active theme (VS Code Dark+ or Light+).
  * Returns `null` for languages we have no grammar for (the caller then renders plain text).
  */
-export async function highlightCode(code: string, path: string): Promise<HighlightedFile | null> {
+export async function highlightCode(
+  code: string,
+  path: string,
+  theme: ThemeMode = 'dark'
+): Promise<HighlightedFile | null> {
   const lang = detectLanguage(path);
   if (!lang) return null;
 
@@ -103,6 +114,7 @@ export async function highlightCode(code: string, path: string): Promise<Highlig
     loadedLangs.add(lang);
   }
 
-  const lines = highlighter.codeToTokensBase(code, { lang, theme: CODE_THEME });
+  const shikiTheme = theme === 'light' ? LIGHT_CODE_THEME : CODE_THEME;
+  const lines = highlighter.codeToTokensBase(code, { lang, theme: shikiTheme });
   return { lines };
 }

@@ -1,9 +1,22 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en" class="dark" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>VisualRepo — Understand any codebase: map it, read it, ask it</title>
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('visualrepo.theme');
+          var mode = t === 'light' ? 'light' : 'dark';
+          var root = document.documentElement;
+          root.classList.toggle('dark', mode === 'dark');
+          root.classList.toggle('light', mode === 'light');
+          root.dataset.theme = mode;
+          root.style.colorScheme = mode;
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body class="bg-slate-950 text-slate-100 antialiased">
     <div id="root"></div>

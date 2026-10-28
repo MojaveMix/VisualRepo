@@ -1,6 +1,7 @@
+import { Fragment } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { Sparkles, ArrowDown, ArrowUp, Zap } from 'lucide-react';
-import { getRoleMeta } from '../lib/archMeta';
+import { getRoleMeta, refineArchitecturalRole } from '../lib/archMeta';
 
 export interface ArchNodeData extends Record<string, unknown> {
   path: string;
@@ -21,9 +22,17 @@ export interface ArchNodeData extends Record<string, unknown> {
   impactHops?: number;
 }
 
+const SIDES: { side: string; position: Position }[] = [
+  { side: 'top', position: Position.Top },
+  { side: 'bottom', position: Position.Bottom },
+  { side: 'left', position: Position.Left },
+  { side: 'right', position: Position.Right },
+];
+
 export function ArchitectureNode({ data }: NodeProps) {
   const d = data as ArchNodeData;
-  const role = getRoleMeta(d.architecturalRole);
+  const effectiveRole = refineArchitecturalRole(d.path, d.architecturalRole, d.language);
+  const role = getRoleMeta(effectiveRole);
   const Icon = role.icon;
 
   const ring = d.isCited
@@ -40,16 +49,27 @@ export function ArchitectureNode({ data }: NodeProps) {
 
   return (
     <div
-      className={`relative w-[232px] cursor-pointer rounded-xl border bg-slate-900 p-3 shadow-lg transition-all duration-200 ${ring} ${
+      className={`relative w-[236px] cursor-pointer rounded-xl border bg-slate-900 p-3 shadow-lg transition-all duration-200 ${ring} ${
         d.isDimmed ? 'opacity-35 saturate-50' : 'opacity-100'
       }`}
       title={d.path}
     >
-      <Handle
-        type="target"
-        position={Position.Top}
-        className="!h-2 !w-2 !border-2 !border-slate-900 !bg-slate-400"
-      />
+      {SIDES.map(({ side, position }) => (
+        <Fragment key={side}>
+          <Handle
+            id={`${side}-target`}
+            type="target"
+            position={position}
+            className="!h-2 !w-2 !border-2 !border-slate-900 !bg-slate-400"
+          />
+          <Handle
+            id={`${side}-source`}
+            type="source"
+            position={position}
+            className="!h-2 !w-2 !border-2 !border-slate-900 !bg-slate-400"
+          />
+        </Fragment>
+      ))}
 
       <div className={`absolute inset-x-0 top-0 h-1 rounded-t-xl ${role.accent}`} />
 
@@ -58,14 +78,16 @@ export function ArchitectureNode({ data }: NodeProps) {
           <Icon className="h-4 w-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] font-semibold leading-tight text-white">{d.label}</div>
-          <div className="text-[10px] font-medium uppercase tracking-wider text-slate-400">
-            {role.label}
+          <div className="truncate text-[13px] font-semibold leading-tight text-slate-100">{d.label}</div>
+          <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-slate-400">
+            <span className="truncate">{role.label}</span>
           </div>
         </div>
       </div>
 
-      <p className="mt-2 line-clamp-2 text-[11px] leading-snug text-slate-400">{role.description}</p>
+      <p className="mt-1.5 truncate font-mono text-[10px] text-slate-400" title={d.directory}>
+        {d.directory === '/' ? d.path : d.directory}
+      </p>
 
       {d.impactKind === 'downstream' && d.impactHops && (
         <div
@@ -119,12 +141,6 @@ export function ArchitectureNode({ data }: NodeProps) {
           </span>
         </div>
       )}
-
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        className="!h-2 !w-2 !border-2 !border-slate-900 !bg-slate-400"
-      />
     </div>
   );
 }

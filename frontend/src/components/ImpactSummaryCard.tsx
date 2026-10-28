@@ -1,6 +1,6 @@
 import { ArrowLeft, ArrowRight, Code2, ShieldAlert, Zap } from 'lucide-react';
 import type { GraphNodeDto } from '../types/api';
-import { getRoleMeta } from '../lib/archMeta';
+import { getRoleMeta, refineArchitecturalRole } from '../lib/archMeta';
 import type { ImpactReport } from '../lib/impactAnalysis';
 
 interface ImpactSummaryCardProps {
@@ -28,7 +28,9 @@ export function ImpactSummaryCard({
   onSelectFile,
   onExitExpanded,
 }: ImpactSummaryCardProps) {
-  const role = getRoleMeta(node.architecturalRole);
+  const role = getRoleMeta(
+    refineArchitecturalRole(node.path, node.architecturalRole, node.language)
+  );
   const shortName = (p: string) => p.split('/').pop() || p;
 
   const downstream = impact?.downstream ?? [];
@@ -60,7 +62,7 @@ export function ImpactSummaryCard({
               className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition ${
                 impactMode
                   ? 'border-amber-400/60 bg-amber-500/20 text-amber-200 shadow-sm'
-                  : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-500/50 hover:text-white'
+                  : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-500/50 hover:text-slate-100'
               }`}
               title="Highlight every file across all layers that could be affected if an AI agent modifies this file"
             >
@@ -150,7 +152,7 @@ export function ImpactSummaryCard({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="flex items-center gap-1.5 font-semibold text-amber-200">
               <ShieldAlert className="h-3.5 w-3.5 text-amber-400" />
-              If an AI agent modifies <code className="font-mono text-white">{node.label}</code>:
+              If an AI agent modifies <code className="font-mono text-slate-100">{node.label}</code>:
             </span>
             {impact && (
               <span className="text-[10px] text-slate-400">

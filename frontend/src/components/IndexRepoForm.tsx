@@ -94,7 +94,7 @@ export function IndexRepoForm({
               setRepo(ex.value);
               setTouched(true);
             }}
-            className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300 transition hover:border-indigo-500/60 hover:text-white disabled:opacity-50"
+            className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300 transition hover:border-indigo-500/60 hover:text-slate-100 disabled:opacity-50"
           >
             {ex.label}
           </button>

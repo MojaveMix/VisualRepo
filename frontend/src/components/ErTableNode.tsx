@@ -57,7 +57,7 @@ export function ErTableNode({ data }: NodeProps) {
       >
         <Table2 className="h-4 w-4 shrink-0 text-indigo-300" />
         <div className="min-w-0">
-          <div className="truncate font-mono text-[13px] font-bold leading-tight text-white">
+          <div className="truncate font-mono text-[13px] font-bold leading-tight text-slate-100">
             {entity.tableName}
           </div>
           <div className="truncate text-[10px] leading-tight text-slate-400">
@@ -99,7 +99,7 @@ export function ErTableNode({ data }: NodeProps) {
               </span>
               <span
                 className={`min-w-0 flex-1 truncate font-mono ${
-                  col.primaryKey ? 'font-semibold text-white' : 'text-slate-200'
+                  col.primaryKey ? 'font-semibold text-slate-100' : 'text-slate-200'
                 }`}
               >
                 {col.name}

@@ -12,6 +12,7 @@ import { Database } from 'lucide-react';
 import type { ErColumn, ErDiagram, ErEntity } from '../types/api';
 import { ErTableNode, type ErTableNodeData } from './ErTableNode';
 import { CARDINALITY, edgeSides, layoutEntities } from '../lib/erLayout';
+import { useTheme } from '../lib/theme';
 
 const nodeTypes = { erTable: ErTableNode };
 
@@ -48,6 +49,8 @@ export function ErDiagramView({
   onSelectEntity,
   onSelectColumn,
 }: ErDiagramViewProps) {
+  const { theme, isDark } = useTheme();
+
   const { nodes, edges } = useMemo(() => {
     if (!diagram) return { nodes: [] as Node[], edges: [] as Edge[] };
 
@@ -102,7 +105,13 @@ export function ErDiagramView({
         layout.rows.get(r.target) ?? 0
       );
       const connected = r.source === selectedEntityId || r.target === selectedEntityId;
-      const color = connected ? '#818cf8' : '#64748b';
+      const color = connected
+        ? isDark
+          ? '#818cf8'
+          : '#4f46e5'
+        : isDark
+        ? '#64748b'
+        : '#94a3b8';
       return {
         id: r.id,
         source: r.source,
@@ -112,8 +121,15 @@ export function ErDiagramView({
         type: 'smoothstep',
         label: CARDINALITY[r.type],
         animated: connected,
-        labelStyle: { fill: '#e2e8f0', fontSize: 10, fontWeight: 700 },
-        labelBgStyle: { fill: '#0f172a', fillOpacity: 0.95 },
+        labelStyle: {
+          fill: isDark ? '#e2e8f0' : '#0f172a',
+          fontSize: 10,
+          fontWeight: 700,
+        },
+        labelBgStyle: {
+          fill: isDark ? '#0f172a' : '#ffffff',
+          fillOpacity: 0.95,
+        },
         labelBgPadding: [6, 3] as [number, number],
         labelBgBorderRadius: 4,
         style: {
@@ -127,7 +143,7 @@ export function ErDiagramView({
     });
 
     return { nodes, edges };
-  }, [diagram, query, selectedEntityId, highlightedColumn, onSelectColumn]);
+  }, [diagram, query, selectedEntityId, highlightedColumn, onSelectColumn, isDark]);
 
   if (!loaded) {
     return (
@@ -162,6 +178,7 @@ export function ErDiagramView({
   return (
     <ReactFlow
       key={`${diagram.repositoryId}-${nodes.length}-${expanded}`}
+      colorMode={theme}
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
@@ -175,12 +192,14 @@ export function ErDiagramView({
       minZoom={0.15}
       maxZoom={1.6}
     >
-      <Background color="#1e293b" gap={22} />
+      <Background color={isDark ? '#1e293b' : '#cbd5e1'} gap={22} />
       <Controls showInteractive={false} className="!border-slate-700 !bg-slate-900 !text-slate-200" />
       {expanded && (
         <MiniMap
-          nodeColor={(n) => (n.id === selectedEntityId ? '#6366f1' : '#334155')}
-          maskColor="rgba(2, 6, 23, 0.75)"
+          nodeColor={(n) =>
+            n.id === selectedEntityId ? '#6366f1' : isDark ? '#334155' : '#94a3b8'
+          }
+          maskColor={isDark ? 'rgba(2, 6, 23, 0.75)' : 'rgba(226, 232, 240, 0.75)'}
           className="!rounded-lg !border !border-slate-800 !bg-slate-900/90"
         />
       )}

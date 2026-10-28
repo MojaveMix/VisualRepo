@@ -33,7 +33,7 @@ export function ErEntitySummaryCard({
             <Table2 className="h-3 w-3" />
             Table
           </span>
-          <span className="truncate font-mono text-xs font-bold text-white">{entity.tableName}</span>
+          <span className="truncate font-mono text-xs font-bold text-slate-100">{entity.tableName}</span>
           <span className="truncate text-[11px] text-slate-400">
             (class <code className="font-mono text-slate-200">{entity.className}</code> · L
             {entity.startLine}-L{entity.endLine})
@@ -87,7 +87,7 @@ export function ErEntitySummaryCard({
                 {other && (
                   <button
                     onClick={() => onSelectEntityById(other.id)}
-                    className="rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-cyan-300 hover:border-cyan-500/40 hover:text-white"
+                    className="rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-cyan-300 hover:border-cyan-500/40 hover:text-slate-100"
                   >
                     → {other.tableName}
                   </button>

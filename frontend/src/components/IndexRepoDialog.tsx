@@ -39,7 +39,7 @@ export function IndexRepoDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/80 p-4 pt-[10vh] backdrop-blur-sm"
+      className="vr-modal-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pt-[10vh] backdrop-blur-sm"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !indexing) onClose();
       }}
@@ -52,7 +52,7 @@ export function IndexRepoDialog({
       >
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-base font-bold text-white">Analyze a repository</h2>
+            <h2 className="text-base font-bold text-slate-100">Analyze a repository</h2>
             <p className="mt-0.5 text-xs text-slate-400">
               Paste a public GitHub repository. VisualRepo reads its files and draws the architecture map.
             </p>
@@ -60,7 +60,7 @@ export function IndexRepoDialog({
           <button
             onClick={onClose}
             disabled={indexing}
-            className="rounded-lg p-1 text-slate-400 transition hover:bg-slate-800 hover:text-white disabled:opacity-40"
+            className="rounded-lg p-1 text-slate-400 transition hover:bg-slate-800 hover:text-slate-100 disabled:opacity-40"
             aria-label="Close"
           >
             <X className="h-4 w-4" />

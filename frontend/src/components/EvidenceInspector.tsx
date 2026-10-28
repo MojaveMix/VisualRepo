@@ -10,8 +10,9 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import type { Citation, SourceFileDetail, SymbolInfo } from '../types/api';
-import { getRoleMeta } from '../lib/archMeta';
-import { EDITOR_BACKGROUND, highlightCode, type HighlightedFile } from '../lib/highlight';
+import { getRoleMeta, refineArchitecturalRole } from '../lib/archMeta';
+import { getEditorBackground, highlightCode, type HighlightedFile } from '../lib/highlight';
+import { useTheme } from '../lib/theme';
 
 interface EvidenceInspectorProps {
   fileDetail: SourceFileDetail | null;
@@ -30,17 +31,22 @@ export function EvidenceInspector({
   onSelectRange,
   onNavigateToFile,
 }: EvidenceInspectorProps) {
+  const { theme, isDark } = useTheme();
   const targetLineRef = useRef<HTMLDivElement | null>(null);
-  const [highlighted, setHighlighted] = useState<{ path: string; data: HighlightedFile } | null>(null);
+  const [highlighted, setHighlighted] = useState<{
+    path: string;
+    theme: string;
+    data: HighlightedFile;
+  } | null>(null);
 
-  // Tokenize the file with the VS Code Dark+ theme (async: grammars load on demand)
+  // Tokenize the file with the active VS Code Dark+ / Light+ theme (async: grammars load on demand)
   useEffect(() => {
     if (!fileDetail) return;
     let cancelled = false;
     const { path, content } = fileDetail;
-    highlightCode(content, path)
+    highlightCode(content, path, theme)
       .then((data) => {
-        if (!cancelled && data) setHighlighted({ path, data });
+        if (!cancelled && data) setHighlighted({ path, theme, data });
       })
       .catch(() => {
         // fall back to plain text if highlighting fails
@@ -48,7 +54,7 @@ export function EvidenceInspector({
     return () => {
       cancelled = true;
     };
-  }, [fileDetail]);
+  }, [fileDetail, theme]);
 
   useEffect(() => {
     if (highlightedRange && targetLineRef.current) {
@@ -82,7 +88,9 @@ export function EvidenceInspector({
 
   const lines = fileDetail.content.split('\n');
   const tokenLines =
-    highlighted && highlighted.path === fileDetail.path ? highlighted.data.lines : null;
+    highlighted && highlighted.path === fileDetail.path && highlighted.theme === theme
+      ? highlighted.data.lines
+      : null;
   const startHighlight = highlightedRange?.startLine ?? -1;
   const endHighlight = highlightedRange?.endLine ?? -1;
 
@@ -121,13 +129,21 @@ export function EvidenceInspector({
             {fileDetail.language}
           </span>
           <span className="rounded bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300 border border-indigo-500/30">
-            {getRoleMeta(fileDetail.architecturalRole).label}
+            {
+              getRoleMeta(
+                refineArchitecturalRole(
+                  fileDetail.path,
+                  fileDetail.architecturalRole,
+                  fileDetail.language
+                )
+              ).label
+            }
           </span>
           <a
             href={githubLink}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1 rounded bg-slate-800 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-700 hover:text-white transition"
+            className="inline-flex items-center gap-1 rounded bg-slate-800 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-700 hover:text-slate-100 transition"
             title="Open file and line range on GitHub"
           >
             <span>GitHub</span>
@@ -184,7 +200,7 @@ export function EvidenceInspector({
                   className={`shrink-0 rounded px-2 py-0.5 font-mono text-[11px] transition border ${
                     isSymActive
                       ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : 'bg-slate-800/80 text-slate-300 border-slate-700/60 hover:bg-slate-800 hover:text-white'
+                      : 'bg-slate-800/80 text-slate-300 border-slate-700/60 hover:bg-slate-800 hover:text-slate-100'
                   }`}
                 >
                   {sym.name}{' '}
@@ -246,10 +262,12 @@ export function EvidenceInspector({
         )}
       </div>
 
-      {/* Source viewer: VS Code Dark+ colours, line numbers & evidence highlight */}
+      {/* Source viewer: VS Code Dark+ / Light+ colours, line numbers & evidence highlight */}
       <div
-        className="flex-1 overflow-auto font-[Consolas,'Cascadia_Code','Courier_New',monospace] text-[13px] leading-[1.55] selection:bg-[#264f78]"
-        style={{ backgroundColor: EDITOR_BACKGROUND }}
+        className={`flex-1 overflow-auto font-[Consolas,'Cascadia_Code','Courier_New',monospace] text-[13px] leading-[1.55] ${
+          isDark ? 'selection:bg-[#264f78]' : 'selection:bg-[#add6ff]'
+        }`}
+        style={{ backgroundColor: getEditorBackground(theme) }}
       >
         <div className="min-w-max py-2">
           {lines.map((lineText, idx) => {
@@ -274,17 +292,27 @@ export function EvidenceInspector({
                 className={`group flex cursor-pointer items-baseline px-3 transition-colors ${
                   isHighlighted
                     ? 'border-l-4 border-emerald-400 bg-emerald-400/15'
-                    : 'border-l-4 border-transparent hover:bg-white/5'
+                    : isDark
+                    ? 'border-l-4 border-transparent hover:bg-white/5'
+                    : 'border-l-4 border-transparent hover:bg-slate-900/5'
                 }`}
               >
                 <span
                   className={`w-12 shrink-0 select-none pr-4 text-right text-[12px] ${
-                    isHighlighted ? 'font-bold text-emerald-300' : 'text-[#858585] group-hover:text-[#c6c6c6]'
+                    isHighlighted
+                      ? 'font-bold text-emerald-300'
+                      : isDark
+                      ? 'text-[#6e7b96] group-hover:text-[#c6d0e5]'
+                      : 'text-[#6e7681] group-hover:text-[#1e293b]'
                   }`}
                 >
                   {lineNum}
                 </span>
-                <pre className="whitespace-pre font-[inherit] text-[#d4d4d4]">
+                <pre
+                  className={`whitespace-pre font-[inherit] ${
+                    isDark ? 'text-[#d4d4d4]' : 'text-[#24292f]'
+                  }`}
+                >
                   {tokens && tokens.length > 0
                     ? tokens.map((tok, i) => (
                         <span

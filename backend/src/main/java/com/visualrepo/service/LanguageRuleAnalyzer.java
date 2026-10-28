@@ -525,39 +525,90 @@ public class LanguageRuleAnalyzer {
     }
 
     public String detectArchitecturalRole(String path, String content, String language) {
-        String lowerPath = path.toLowerCase(Locale.ROOT);
-        if (lowerPath.contains("/controller/") || lowerPath.endsWith("controller.java")
-                || content.contains("@RestController") || content.contains("@Controller")
-                || lowerPath.contains("/routes/") || lowerPath.contains("router")) {
-            return "CONTROLLER";
-        }
-        if (lowerPath.contains("/service/") || lowerPath.endsWith("service.java")
-                || content.contains("@Service")) {
-            return "SERVICE";
-        }
-        if (lowerPath.contains("/repository/") || lowerPath.contains("/dao/")
-                || lowerPath.endsWith("repository.java") || content.contains("@Repository")
-                || content.contains("extends JpaRepository")) {
-            return "REPOSITORY";
-        }
-        if (lowerPath.contains("/model/") || lowerPath.contains("/entity/") || lowerPath.contains("/domain/")
-                || lowerPath.contains("/dto/") || lowerPath.contains("/types/")
-                || content.contains("@Entity") || content.contains("@Table")) {
-            return "MODEL";
-        }
-        if (lowerPath.contains("/components/") || lowerPath.contains("/pages/") || lowerPath.contains("/views/")
-                || lowerPath.endsWith(".tsx") || lowerPath.endsWith(".jsx")) {
-            return "UI_COMPONENT";
-        }
-        if (lowerPath.contains("/api/") || lowerPath.contains("client") || lowerPath.contains("fetch(")) {
-            return "API_CLIENT";
-        }
-        if (lowerPath.contains("/config/") || content.contains("@Configuration") || "Configuration".equals(language)) {
-            return "CONFIG";
-        }
-        if (lowerPath.contains("/test/") || lowerPath.endsWith("test.java") || lowerPath.contains(".spec.") || lowerPath.contains(".test.")) {
+        String lowerPath = "/" + path.toLowerCase(Locale.ROOT);
+        String fileName = extractSimpleFilename(lowerPath);
+
+        // 1. Test files first so tests inside /service/ or /controller/ are not misclassified as production tiers
+        if (lowerPath.contains("/test/") || lowerPath.contains("/tests/") || lowerPath.contains("/__tests__/")
+                || fileName.endsWith("test.java") || fileName.endsWith("tests.java")
+                || fileName.startsWith("test_") || fileName.endsWith("_test.py") || fileName.endsWith("_test.go")
+                || fileName.contains(".spec.") || fileName.contains(".test.")) {
             return "TEST";
         }
+
+        // 2. Configuration, build & documentation files
+        if (lowerPath.contains("/config/") || lowerPath.contains("/configs/") || lowerPath.contains("/settings/")
+                || fileName.endsWith("config.java") || fileName.equals("config.py") || fileName.equals("settings.py")
+                || fileName.contains(".config.") || fileName.equals("vite.config.ts")
+                || content.contains("@Configuration") || "Configuration".equals(language) || "Markdown".equals(language)) {
+            return "CONFIG";
+        }
+
+        // 3. Frontend UI components & views
+        boolean isFrontendPath = lowerPath.contains("/frontend/") || lowerPath.contains("/client/")
+                || lowerPath.contains("/web/") || lowerPath.contains("/ui/");
+        if (lowerPath.contains("/components/") || lowerPath.contains("/pages/") || lowerPath.contains("/views/")
+                || lowerPath.contains("/screens/") || lowerPath.contains("/layouts/")
+                || lowerPath.endsWith(".tsx") || lowerPath.endsWith(".jsx")
+                || lowerPath.endsWith(".vue") || lowerPath.endsWith(".svelte")) {
+            return "UI_COMPONENT";
+        }
+
+        // 4. Frontend API clients & HTTP integration bridges
+        if ((isFrontendPath && (lowerPath.contains("/api/") || lowerPath.contains("/services/") || fileName.contains("api") || fileName.contains("client")))
+                || fileName.endsWith("api.ts") || fileName.endsWith("api.js")
+                || fileName.endsWith("client.ts") || fileName.endsWith("client.js")
+                || (("TypeScript".equals(language) || "JavaScript".equals(language))
+                    && (content.contains("fetch(") || content.contains("axios.")))) {
+            return "API_CLIENT";
+        }
+
+        // 5. Domain models, database entities, schemas & DTOs
+        if (lowerPath.contains("/model/") || lowerPath.contains("/models/")
+                || lowerPath.contains("/entity/") || lowerPath.contains("/entities/")
+                || lowerPath.contains("/domain/") || lowerPath.contains("/schema/") || lowerPath.contains("/schemas/")
+                || lowerPath.contains("/dto/") || lowerPath.contains("/dtos/") || lowerPath.contains("/types/")
+                || "SQL".equals(language) || fileName.endsWith(".prisma")
+                || content.contains("@Entity") || content.contains("@Table")
+                || content.contains("@dataclass") || content.contains("(BaseModel)")) {
+            return "MODEL";
+        }
+
+        // 6. Data access, repositories, vector stores & DAOs
+        if (lowerPath.contains("/repository/") || lowerPath.contains("/repositories/")
+                || lowerPath.contains("/dao/") || lowerPath.contains("/store/") || lowerPath.contains("/stores/")
+                || lowerPath.contains("/db/") || lowerPath.contains("/database/")
+                || fileName.endsWith("repository.java") || fileName.endsWith("store.py") || fileName.endsWith("vectorstore.py")
+                || content.contains("@Repository") || content.contains("extends JpaRepository")
+                || content.contains("CREATE TABLE") || content.contains("get_or_create_collection")) {
+            return "REPOSITORY";
+        }
+
+        // 7. API Controllers, routers & HTTP entrypoints
+        if (lowerPath.contains("/controller/") || lowerPath.contains("/controllers/")
+                || lowerPath.contains("/routes/") || lowerPath.contains("/routers/") || lowerPath.contains("/endpoints/")
+                || fileName.endsWith("controller.java") || fileName.contains("router")
+                || fileName.equals("app.py") || fileName.equals("main.py") || fileName.equals("server.py")
+                || fileName.equals("server.ts") || fileName.equals("server.js")
+                || content.contains("@RestController") || content.contains("@Controller")
+                || content.contains("FastAPI(") || content.contains("APIRouter(") || content.contains("Flask(")) {
+            return "CONTROLLER";
+        }
+
+        // 8. Business services, orchestrators & domain pipelines
+        if (lowerPath.contains("/service/") || lowerPath.contains("/services/")
+                || lowerPath.contains("/usecase/") || lowerPath.contains("/usecases/")
+                || lowerPath.contains("/rag/") || lowerPath.contains("/pipeline/")
+                || fileName.endsWith("service.java") || fileName.endsWith("_service.py")
+                || content.contains("@Service") || content.contains("@Component")) {
+            return "SERVICE";
+        }
+
+        // 9. Frontend supporting libraries/hooks stay with Frontend API/Client layer
+        if (isFrontendPath) {
+            return "API_CLIENT";
+        }
+
         return "MODULE";
     }
 

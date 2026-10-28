@@ -19,8 +19,11 @@ import type {
   RepositorySummary,
   SystemStatus,
 } from '../types/api';
+import { PaneHeader, type PaneDragHandlers } from './PaneHeader';
 
 interface CitedAiPanelProps {
+  step?: number;
+  drag?: PaneDragHandlers;
   currentRepo: RepositorySummary | null;
   systemStatus: SystemStatus | null;
   history: CitedAnswerResponse[];
@@ -47,6 +50,8 @@ const GENERIC_QUESTIONS = [
 ];
 
 export function CitedAiPanel({
+  step = 3,
+  drag,
   currentRepo,
   systemStatus,
   history,
@@ -99,45 +104,39 @@ export function CitedAiPanel({
   return (
     <div className="flex h-full flex-col overflow-hidden bg-slate-950">
       {/* Header & Tabs */}
-      <div className="flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-900/80 px-4 py-2.5">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-[11px] font-bold text-white">
-            3
-          </span>
-          <div className="min-w-0">
-            <h2 className="flex items-center gap-1.5 truncate text-sm font-semibold leading-tight text-white">
-              <MessageSquareCode className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
-              Ask the AI
-            </h2>
-            <p className="truncate text-[11px] text-slate-400">Answers backed by exact lines (Ollama)</p>
+      <PaneHeader
+        step={step}
+        title="Ask the AI"
+        subtitle="Answers backed by exact lines (Ollama)"
+        icon={MessageSquareCode}
+        drag={drag}
+        actions={
+          <div className="flex rounded-lg border border-slate-800 bg-slate-900 p-0.5 text-[11px]">
+            <button
+              onClick={() => setActiveTab('ask')}
+              className={`flex items-center gap-1 rounded-md px-2.5 py-1 font-medium transition ${
+                activeTab === 'ask'
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Sparkles className="h-3 w-3" />
+              Ask
+            </button>
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`flex items-center gap-1 rounded-md px-2.5 py-1 font-medium transition ${
+                activeTab === 'history'
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <History className="h-3 w-3" />
+              History ({history.length})
+            </button>
           </div>
-        </div>
-
-        <div className="flex rounded-lg bg-slate-900 p-0.5 border border-slate-800 text-[11px]">
-          <button
-            onClick={() => setActiveTab('ask')}
-            className={`flex items-center gap-1 rounded-md px-2.5 py-1 font-medium transition ${
-              activeTab === 'ask'
-                ? 'bg-indigo-600 text-white'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Sparkles className="h-3 w-3" />
-            Ask
-          </button>
-          <button
-            onClick={() => setActiveTab('history')}
-            className={`flex items-center gap-1 rounded-md px-2.5 py-1 font-medium transition ${
-              activeTab === 'history'
-                ? 'bg-indigo-600 text-white'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <History className="h-3 w-3" />
-            History ({history.length})
-          </button>
-        </div>
-      </div>
+        }
+      />
 
       {/* Search quality & advanced settings */}
       {currentRepo && (
@@ -243,7 +242,7 @@ export function CitedAiPanel({
                     key={sq}
                     onClick={() => handleSuggestedClick(sq)}
                     disabled={asking || !currentRepo}
-                    className="rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-left text-[11px] text-slate-300 hover:border-indigo-500/40 hover:bg-slate-800/90 hover:text-white transition disabled:opacity-50"
+                    className="rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-left text-[11px] text-slate-300 hover:border-indigo-500/40 hover:bg-slate-800/90 hover:text-slate-100 transition disabled:opacity-50"
                   >
                     {sq}
                   </button>
@@ -364,7 +363,7 @@ function AnswerCard({
             {item.retrievalMode}
           </span>
         </div>
-        <h4 className="text-xs font-semibold text-white leading-snug">
+        <h4 className="text-xs font-semibold text-slate-100 leading-snug">
           Q: {item.question}
         </h4>
       </div>
@@ -434,7 +433,7 @@ function AnswerCard({
                         href={cit.githubBlobUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="rounded bg-slate-800 p-1 text-slate-400 hover:text-white"
+                        className="rounded bg-slate-800 p-1 text-slate-400 hover:text-slate-100"
                         title="Open exact lines on GitHub"
                       >
                         <ExternalLink className="h-3 w-3" />
@@ -442,7 +441,7 @@ function AnswerCard({
                     )}
                     <button
                       onClick={() => onToggleSnippet(key)}
-                      className="rounded bg-slate-800 p-1 text-slate-400 hover:text-white"
+                      className="rounded bg-slate-800 p-1 text-slate-400 hover:text-slate-100"
                       title="Toggle code snippet preview"
                     >
                       {isExpanded ? (
