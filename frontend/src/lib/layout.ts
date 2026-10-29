@@ -9,7 +9,8 @@ import {
 
 export const NODE_WIDTH = 236;
 export const COL_WIDTH = 276;
-export const ROW_HEIGHT = 186;
+export const CARD_HEIGHT = 168;
+export const ROW_HEIGHT = 218;
 const LANE_PADDING_X = 32;
 const LANE_HEADER = 64;
 const LANE_PADDING_BOTTOM = 22;
@@ -288,7 +289,7 @@ export function layoutGraph(
 
     const totalRowsInLane = Math.max(1, finalRows.length);
     const laneHeight =
-      LANE_HEADER + totalRowsInLane * ROW_HEIGHT - (ROW_HEIGHT - 144) + LANE_PADDING_BOTTOM;
+      LANE_HEADER + totalRowsInLane * ROW_HEIGHT - (ROW_HEIGHT - CARD_HEIGHT) + LANE_PADDING_BOTTOM;
 
     finalRows.forEach((rowNodes, localRowIdx) => {
       const rowWidth = rowNodes.length * COL_WIDTH - (COL_WIDTH - NODE_WIDTH);
@@ -357,4 +358,158 @@ export function archEdgeSides(
   return target.x >= source.x
     ? { sourceSide: 'right', targetSide: 'left' }
     : { sourceSide: 'left', targetSide: 'right' };
+}
+
+export const OVERVIEW_NODE_WIDTH = 540;
+export const OVERVIEW_NODE_HEIGHT = 176;
+const OVERVIEW_GAP = 120;
+
+export interface OverviewLayer {
+  /** Same id as the matching swimlane in the detailed layout (`lane-<tier>`). */
+  id: string;
+  step: number;
+  title: string;
+  subtitle: string;
+  color: string;
+  count: number;
+  roleBadges: string[];
+  /** The most connected files in the layer, to give a quick sense of what lives there. */
+  topFiles: { id: string; label: string }[];
+  fileIds: string[];
+  /** Number of dependencies between files that live inside this same layer. */
+  internalLinks: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface OverviewLink {
+  id: string;
+  source: string;
+  target: string;
+  /** Number of file-to-file dependencies collapsed into this arrow. */
+  count: number;
+  /** How many of them are frontend -> backend API calls. */
+  apiCalls: number;
+  /** True when the arrow jumps over one or more layers in between. */
+  skipsLayers: boolean;
+  /** True when the dependency points back up the stack (target layer is above source layer). */
+  upward: boolean;
+  /** Index among layer-skipping arrows, used to keep their routes from overlapping. */
+  skipIndex: number;
+}
+
+export interface OverviewLayout {
+  layers: OverviewLayer[];
+  links: OverviewLink[];
+  /** node id -> overview layer id */
+  layerOfNode: Map<string, string>;
+}
+
+/**
+ * Collapses the file graph into a high-level "big picture": one card per architectural layer,
+ * stacked in request-flow order, with a single arrow per pair of layers that talk to each other.
+ */
+export function layoutOverview(nodes: GraphNodeDto[], edges: GraphEdgeDto[] = []): OverviewLayout {
+  const groups = new Map<string, GraphNodeDto[]>();
+  const layerOfNode = new Map<string, string>();
+  const roleLabelById = new Map<string, string>();
+
+  for (const n of nodes) {
+    const tier = resolveNodeLayerKey(n);
+    const list = groups.get(tier) ?? [];
+    list.push(n);
+    groups.set(tier, list);
+    layerOfNode.set(n.id, `lane-${tier}`);
+    const role = refineArchitecturalRole(n.path, n.architecturalRole, n.language);
+    roleLabelById.set(n.id, getRoleMeta(role).label);
+  }
+
+  const orderedTiers = [...groups.keys()].sort(
+    (a, b) => layerOrder(a) - layerOrder(b) || a.localeCompare(b)
+  );
+  const indexOfLayer = new Map<string, number>();
+  orderedTiers.forEach((t, i) => indexOfLayer.set(`lane-${t}`, i));
+
+  const internalLinks = new Map<string, number>();
+  const pairCounts = new Map<string, { source: string; target: string; count: number; apiCalls: number }>();
+  for (const e of edges) {
+    if (e.source === e.target) continue;
+    const s = layerOfNode.get(e.source);
+    const t = layerOfNode.get(e.target);
+    if (!s || !t) continue;
+    if (s === t) {
+      internalLinks.set(s, (internalLinks.get(s) ?? 0) + 1);
+      continue;
+    }
+    const key = `${s}->${t}`;
+    const entry = pairCounts.get(key) ?? { source: s, target: t, count: 0, apiCalls: 0 };
+    entry.count++;
+    if (e.relationType === 'API_CALL') entry.apiCalls++;
+    pairCounts.set(key, entry);
+  }
+
+  const layers: OverviewLayer[] = orderedTiers.map((tier, i) => {
+    const members = groups.get(tier)!;
+    const id = `lane-${tier}`;
+    const roleCounts = new Map<string, number>();
+    for (const m of members) {
+      const label = roleLabelById.get(m.id) ?? m.architecturalRole;
+      roleCounts.set(label, (roleCounts.get(label) ?? 0) + 1);
+    }
+    const roleBadges = [...roleCounts.entries()].map(([label, cnt]) =>
+      roleCounts.size > 1 ? `${label} (${cnt})` : label
+    );
+    const topFiles = [...members]
+      .sort(
+        (a, b) =>
+          b.incomingCount + b.outgoingCount - (a.incomingCount + a.outgoingCount) ||
+          a.path.localeCompare(b.path)
+      )
+      .slice(0, 4)
+      .map((m) => ({ id: m.id, label: m.label }));
+    const meta = getLayerMeta(tier);
+    return {
+      id,
+      step: i + 1,
+      title: meta.title,
+      subtitle: meta.subtitle,
+      color: meta.color,
+      count: members.length,
+      roleBadges,
+      topFiles,
+      fileIds: members.map((m) => m.id),
+      internalLinks: internalLinks.get(id) ?? 0,
+      x: 0,
+      y: i * (OVERVIEW_NODE_HEIGHT + OVERVIEW_GAP),
+      width: OVERVIEW_NODE_WIDTH,
+      height: OVERVIEW_NODE_HEIGHT,
+    };
+  });
+
+  let skipCounter = 0;
+  const links: OverviewLink[] = [...pairCounts.values()]
+    .sort(
+      (a, b) =>
+        (indexOfLayer.get(a.source) ?? 0) - (indexOfLayer.get(b.source) ?? 0) ||
+        (indexOfLayer.get(a.target) ?? 0) - (indexOfLayer.get(b.target) ?? 0)
+    )
+    .map((p) => {
+      const si = indexOfLayer.get(p.source) ?? 0;
+      const ti = indexOfLayer.get(p.target) ?? 0;
+      const skips = Math.abs(ti - si) > 1;
+      return {
+        id: `overview-${p.source}->${p.target}`,
+        source: p.source,
+        target: p.target,
+        count: p.count,
+        apiCalls: p.apiCalls,
+        skipsLayers: skips,
+        upward: ti < si,
+        skipIndex: skips ? skipCounter++ : 0,
+      };
+    });
+
+  return { layers, links, layerOfNode };
 }

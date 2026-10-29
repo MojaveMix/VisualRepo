@@ -39,6 +39,9 @@ import {
   ChevronRight,
   Minus,
   Columns3,
+  Layers,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { apiClient } from './api/client';
 import type {
@@ -55,6 +58,7 @@ import type {
 } from './types/api';
 import { ArchitectureNode, type ArchNodeData } from './components/ArchitectureNode';
 import { LaneNode, type LaneNodeData } from './components/LaneNode';
+import { LayerSummaryNode, type LayerSummaryNodeData } from './components/LayerSummaryNode';
 import { ErDiagramView } from './components/ErDiagramView';
 import { ErEntitySummaryCard } from './components/ErEntitySummaryCard';
 import { ImpactSummaryCard } from './components/ImpactSummaryCard';
@@ -65,15 +69,26 @@ import { WelcomeScreen } from './components/WelcomeScreen';
 import { MapLegend } from './components/MapLegend';
 import { PaneHeader, type PaneDragHandlers, type PaneId } from './components/PaneHeader';
 import { ThemeToggle } from './components/ThemeToggle';
-import { getRoleMeta, refineArchitecturalRole, relationLabel } from './lib/archMeta';
+import {
+  getLayerMeta,
+  getRoleMeta,
+  LAYERS,
+  refineArchitecturalRole,
+  relationLabel,
+  resolveNodeLayerKey,
+} from './lib/archMeta';
 import { computeImpactReport } from './lib/impactAnalysis';
-import { archEdgeSides, layoutGraph } from './lib/layout';
+import { archEdgeSides, layoutGraph, layoutOverview, OVERVIEW_NODE_HEIGHT, OVERVIEW_NODE_WIDTH } from './lib/layout';
 import { useTheme } from './lib/theme';
 
 const nodeTypes = {
   archNode: ArchitectureNode,
   lane: LaneNode,
+  layerSummary: LayerSummaryNode,
 };
+
+/** Above this many dependencies the detailed map hides unrelated arrows until a file is selected. */
+const AUTO_SHOW_ALL_EDGES_LIMIT = 30;
 
 const PANE_ORDER_KEY = 'visualrepo.paneOrder';
 const PANE_WIDTHS_KEY = 'visualrepo.paneWidths';
@@ -191,6 +206,12 @@ export default function App() {
   } | null>(null);
 
   const [leftView, setLeftView] = useState<'graph' | 'er' | 'tree'>('graph');
+  // 'overview' = one card per architectural layer (the big picture); 'detail' = every file.
+  const [mapMode, setMapMode] = useState<'overview' | 'detail'>('overview');
+  // When set (in detail mode), the camera zooms to this layer's lane on load.
+  const [focusLayerId, setFocusLayerId] = useState<string | null>(null);
+  // null = automatic (hide unrelated arrows only when the repo has many dependencies)
+  const [showAllEdges, setShowAllEdges] = useState<boolean | null>(null);
   const [impactMode, setImpactMode] = useState(false);
   const [graphExpanded, setGraphExpanded] = useState(false);
   const [codeFullscreen, setCodeFullscreen] = useState(false);
@@ -548,6 +569,9 @@ export default function App() {
       setErDiagram(er);
       setErLoaded(true);
       setRoleFilter('ALL');
+      setMapMode('overview');
+      setFocusLayerId(null);
+      setShowAllEdges(null);
       setFileSearch('');
       setHighlightedColumn(null);
       setSelectedEntityId(er && er.entities.length > 0 ? er.entities[0].id : null);
@@ -797,8 +821,20 @@ export default function App() {
     [erDiagram, selectedEntityId]
   );
 
-  const { flowNodes, flowEdges } = useMemo(() => {
-    if (!graphData) return { flowNodes: [] as Node[], flowEdges: [] as Edge[] };
+  // Searching for a file/function only makes sense on the detailed map.
+  const effectiveMapMode: 'overview' | 'detail' = fileSearch.trim() ? 'detail' : mapMode;
+  const edgeCount = graphData?.edges.length ?? 0;
+  const effectiveShowAllEdges = showAllEdges ?? edgeCount <= AUTO_SHOW_ALL_EDGES_LIMIT;
+
+  const { flowNodes, flowEdges, visibleCount, focusNodeIds } = useMemo(() => {
+    if (!graphData) {
+      return {
+        flowNodes: [] as Node[],
+        flowEdges: [] as Edge[],
+        visibleCount: 0,
+        focusNodeIds: undefined as { id: string }[] | undefined,
+      };
+    }
 
     const query = fileSearch.trim().toLowerCase();
     const visible = graphData.nodes
@@ -814,6 +850,137 @@ export default function App() {
           n.symbols.some((s) => s.toLowerCase().includes(query))
       );
 
+    // ---- Big picture: one card per layer, one arrow per pair of layers ----
+    if (effectiveMapMode === 'overview') {
+      const ov = layoutOverview(visible, graphData.edges);
+      const layerTitle = new Map(ov.layers.map((l) => [l.id, l.title]));
+      const selectedLayerId = selectedFilePath ? ov.layerOfNode.get(selectedFilePath) : undefined;
+
+      const usesByLayer = new Map<string, { title: string; count: number }[]>();
+      for (const link of ov.links) {
+        const list = usesByLayer.get(link.source) ?? [];
+        list.push({ title: layerTitle.get(link.target) ?? '', count: link.count });
+        usesByLayer.set(link.source, list);
+      }
+
+      const citedByLayer = new Map<string, number>();
+      for (const n of visible) {
+        if (!citedFileMap.has(n.path)) continue;
+        const layerId = ov.layerOfNode.get(n.id);
+        if (layerId) citedByLayer.set(layerId, (citedByLayer.get(layerId) ?? 0) + 1);
+      }
+
+      const layerNodes: Node[] = ov.layers.map((layer) => {
+        const data: LayerSummaryNodeData = {
+          step: layer.step,
+          title: layer.title,
+          subtitle: layer.subtitle,
+          color: layer.color,
+          count: layer.count,
+          roleBadges: layer.roleBadges,
+          topFiles: layer.topFiles,
+          internalLinks: layer.internalLinks,
+          usesLayers: usesByLayer.get(layer.id) ?? [],
+          citedCount: citedByLayer.get(layer.id) ?? 0,
+          containsSelected: layer.id === selectedLayerId,
+          selectedLabel: selectedGraphNode?.label,
+          width: OVERVIEW_NODE_WIDTH,
+          height: OVERVIEW_NODE_HEIGHT,
+        };
+        return {
+          id: layer.id,
+          type: 'layerSummary',
+          position: { x: layer.x, y: layer.y },
+          data,
+          draggable: false,
+        };
+      });
+
+      const layerEdges: Edge[] = ov.links.map((link) => {
+        const isApi = link.apiCalls > 0 && link.apiCalls === link.count;
+        const fromSelected = link.source === selectedLayerId;
+        const intoSelected = link.target === selectedLayerId;
+        const hasLayerFocus = !!selectedLayerId;
+        const highlighted = fromSelected || intoSelected;
+
+        const color = fromSelected
+          ? isDark
+            ? '#818cf8'
+            : '#4f46e5'
+          : intoSelected
+          ? isDark
+            ? '#34d399'
+            : '#059669'
+          : isApi
+          ? isDark
+            ? '#ec4899'
+            : '#db2777'
+          : isDark
+          ? '#64748b'
+          : '#94a3b8';
+
+        let sourceSide: string;
+        let targetSide: string;
+        if (link.skipsLayers) {
+          sourceSide = link.upward ? 'left' : 'right';
+          targetSide = sourceSide;
+        } else if (link.upward) {
+          sourceSide = 'top';
+          targetSide = 'bottom';
+        } else {
+          sourceSide = 'bottom';
+          targetSide = 'top';
+        }
+
+        const noun = link.count === 1 ? 'link' : 'links';
+        const label = isApi
+          ? `calls API · ${link.count} ${noun}`
+          : link.upward
+          ? `${link.count} ${noun} (points back up)`
+          : `${link.count} ${noun}`;
+
+        return {
+          id: link.id,
+          source: link.source,
+          target: link.target,
+          sourceHandle: `${sourceSide}-source`,
+          targetHandle: `${targetSide}-target`,
+          type: 'smoothstep',
+          pathOptions: link.skipsLayers
+            ? { offset: 36 + link.skipIndex * 24, borderRadius: 18 }
+            : { borderRadius: 18 },
+          label,
+          animated: highlighted,
+          labelStyle: {
+            fill: isDark ? '#e2e8f0' : '#0f172a',
+            fontSize: 11,
+            fontWeight: 600,
+          },
+          labelBgStyle: {
+            fill: isDark ? '#0f172a' : '#ffffff',
+            fillOpacity: 0.95,
+          },
+          labelBgPadding: [8, 4] as [number, number],
+          labelBgBorderRadius: 6,
+          style: {
+            stroke: color,
+            strokeWidth: Math.min(5, 1.8 + Math.log2(link.count + 1) * 0.7),
+            strokeDasharray: isApi ? '6 4' : undefined,
+            opacity: hasLayerFocus && !highlighted ? 0.45 : 1,
+          },
+          markerEnd: { type: MarkerType.ArrowClosed, color },
+        } as Edge;
+      });
+
+      return {
+        flowNodes: layerNodes,
+        flowEdges: layerEdges,
+        visibleCount: visible.length,
+        focusNodeIds: undefined as { id: string }[] | undefined,
+      };
+    }
+
+    // ---- Detail: every file, grouped in layer lanes ----
     const layout = layoutGraph(visible, graphData.edges);
     const downHops = impactReport?.downstreamHops ?? new Map<string, number>();
     const upHops = impactReport?.upstreamHops ?? new Map<string, number>();
@@ -894,7 +1061,7 @@ export default function App() {
     const visibleIds = new Set(visible.map((n) => n.id));
     const edges: Edge[] = graphData.edges
       .filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target))
-      .map((e) => {
+      .flatMap((e): Edge[] => {
         const sourcePos = layout.positions.get(e.source) ?? { x: 0, y: 0 };
         const targetPos = layout.positions.get(e.target) ?? { x: 0, y: 0 };
         const { sourceSide, targetSide } = archEdgeSides(
@@ -918,6 +1085,9 @@ export default function App() {
         const isConnected =
           isDirectOutgoing || isDirectIncoming || isDownstreamChain || isUpstreamChain;
         const isApiCall = e.relationType === 'API_CALL';
+
+        // On big repos, hide arrows that are not tied to the selected file to avoid a hairball.
+        if (!effectiveShowAllEdges && hasFocus && !isConnected) return [];
 
         const color = isDownstreamChain
           ? isDirectIncoming
@@ -943,37 +1113,55 @@ export default function App() {
           ? '#475569'
           : '#94a3b8';
 
-        return {
-          id: e.id,
-          source: e.source,
-          target: e.target,
-          sourceHandle: `${sourceSide}-source`,
-          targetHandle: `${targetSide}-target`,
-          type: 'smoothstep',
-          label: isConnected ? relationLabel(e.relationType) : undefined,
-          animated: isConnected,
-          labelStyle: {
-            fill: isDark ? '#e2e8f0' : '#0f172a',
-            fontSize: 10,
-            fontWeight: 600,
+        return [
+          {
+            id: e.id,
+            source: e.source,
+            target: e.target,
+            sourceHandle: `${sourceSide}-source`,
+            targetHandle: `${targetSide}-target`,
+            type: 'smoothstep',
+            label: isConnected ? relationLabel(e.relationType) : undefined,
+            animated: isConnected,
+            labelStyle: {
+              fill: isDark ? '#e2e8f0' : '#0f172a',
+              fontSize: 10,
+              fontWeight: 600,
+            },
+            labelBgStyle: {
+              fill: isDark ? '#0f172a' : '#ffffff',
+              fillOpacity: 0.92,
+            },
+            labelBgPadding: [6, 3] as [number, number],
+            labelBgBorderRadius: 4,
+            style: {
+              stroke: color,
+              strokeWidth: isConnected ? 2.4 : 1.4,
+              strokeDasharray: isApiCall ? '6 4' : undefined,
+              opacity: hasFocus && !isConnected ? 0.25 : 1,
+            },
+            markerEnd: { type: MarkerType.ArrowClosed, color },
           },
-          labelBgStyle: {
-            fill: isDark ? '#0f172a' : '#ffffff',
-            fillOpacity: 0.92,
-          },
-          labelBgPadding: [6, 3] as [number, number],
-          labelBgBorderRadius: 4,
-          style: {
-            stroke: color,
-            strokeWidth: isConnected ? 2.4 : 1.4,
-            strokeDasharray: isApiCall ? '6 4' : undefined,
-            opacity: hasFocus && !isConnected ? 0.25 : 1,
-          },
-          markerEnd: { type: MarkerType.ArrowClosed, color },
-        };
+        ];
       });
 
-    return { flowNodes: [...laneNodes, ...archNodes], flowEdges: edges };
+    // When a layer was opened from the overview, zoom the camera to that lane.
+    let detailFocus: { id: string }[] | undefined;
+    if (focusLayerId && layout.lanes.some((l) => l.id === focusLayerId)) {
+      detailFocus = [
+        { id: focusLayerId },
+        ...visible
+          .filter((n) => `lane-${resolveNodeLayerKey(n)}` === focusLayerId)
+          .map((n) => ({ id: n.id })),
+      ];
+    }
+
+    return {
+      flowNodes: [...laneNodes, ...archNodes],
+      flowEdges: edges,
+      visibleCount: visible.length,
+      focusNodeIds: detailFocus,
+    };
   }, [
     graphData,
     roleFilter,
@@ -984,12 +1172,23 @@ export default function App() {
     impactMode,
     citedFileMap,
     isDark,
+    effectiveMapMode,
+    effectiveShowAllEdges,
+    focusLayerId,
   ]);
 
-  const visibleFileCount = useMemo(
-    () => flowNodes.filter((n) => n.type === 'archNode').length,
-    [flowNodes]
-  );
+  const visibleFileCount = visibleCount;
+
+  const openLayerDetail = useCallback((layerId: string | null) => {
+    setFocusLayerId(layerId);
+    setMapMode('detail');
+  }, []);
+
+  const showOverview = useCallback(() => {
+    setFocusLayerId(null);
+    setMapMode('overview');
+    setFileSearch('');
+  }, []);
 
   const filteredFiles = useMemo(() => {
     return files
@@ -1056,6 +1255,8 @@ export default function App() {
                 ? 'Tables, columns, primary/foreign keys and relationships'
                 : impactMode
                 ? 'Blast radius: highlighting every file affected if the selected file changes'
+                : effectiveMapMode === 'overview'
+                ? 'Big picture: how a request travels through the layers of the app'
                 : 'Layers of the app and how its files depend on each other'
             }
             drag={dragHandlers}
@@ -1210,7 +1411,85 @@ export default function App() {
           <div className="relative flex-1 overflow-hidden bg-slate-950">
             {leftView === 'graph' ? (
               <>
-                <MapLegend />
+                <MapLegend mode={effectiveMapMode} />
+                {/* Map navigation: big picture <-> files, jump to a layer, arrow visibility */}
+                <div className="absolute left-3 top-3 z-10 flex max-w-[calc(100%-6.5rem)] flex-col gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex rounded-lg border border-slate-700 bg-slate-900/95 p-0.5 text-[11px] shadow-lg">
+                      <button
+                        onClick={showOverview}
+                        className={`flex items-center gap-1 rounded-md px-2 py-1 font-semibold transition ${
+                          effectiveMapMode === 'overview'
+                            ? 'bg-indigo-600 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="One card per layer, with arrows showing how the layers talk"
+                      >
+                        <Layers className="h-3.5 w-3.5" />
+                        Big picture
+                      </button>
+                      <button
+                        onClick={() => openLayerDetail(null)}
+                        className={`flex items-center gap-1 rounded-md px-2 py-1 font-semibold transition ${
+                          effectiveMapMode === 'detail'
+                            ? 'bg-indigo-600 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Every file, grouped by layer"
+                      >
+                        <Network className="h-3.5 w-3.5" />
+                        All files
+                      </button>
+                    </div>
+                    {effectiveMapMode === 'detail' && edgeCount > AUTO_SHOW_ALL_EDGES_LIMIT && (
+                      <button
+                        onClick={() => setShowAllEdges(!effectiveShowAllEdges)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/95 px-2 py-1.5 text-[11px] font-medium text-slate-300 shadow-lg transition hover:border-indigo-500/60 hover:text-slate-100"
+                        title={
+                          effectiveShowAllEdges
+                            ? 'Hide arrows that are not connected to the selected file'
+                            : 'Show every arrow between files'
+                        }
+                      >
+                        {effectiveShowAllEdges ? (
+                          <Eye className="h-3.5 w-3.5 text-indigo-300" />
+                        ) : (
+                          <EyeOff className="h-3.5 w-3.5 text-slate-400" />
+                        )}
+                        {effectiveShowAllEdges
+                          ? `All ${edgeCount} arrows`
+                          : 'Selected file only'}
+                      </button>
+                    )}
+                  </div>
+                  {effectiveMapMode === 'detail' && graphData && (
+                    <div className="flex flex-wrap items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/90 p-1 shadow-lg">
+                      <span className="px-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                        Jump to
+                      </span>
+                      {LAYERS.filter((l) =>
+                        graphData.nodes.some((n) => resolveNodeLayerKey(n) === l.key)
+                      ).map((l) => {
+                        const laneId = `lane-${l.key}`;
+                        const active = focusLayerId === laneId;
+                        return (
+                          <button
+                            key={l.key}
+                            onClick={() => openLayerDetail(laneId)}
+                            className="rounded-full px-2 py-0.5 text-[10px] font-semibold transition hover:brightness-125"
+                            style={{
+                              backgroundColor: `${l.color}${active ? '44' : '1f'}`,
+                              color: l.color,
+                              boxShadow: active ? `inset 0 0 0 1px ${l.color}` : undefined,
+                            }}
+                          >
+                            {getLayerMeta(l.key).title}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
                 {visibleFileCount === 0 ? (
                   <div className="flex h-full flex-col items-center justify-center p-6 text-center text-slate-400">
                     <Network className="mb-2 h-8 w-8 text-slate-700" />
@@ -1219,18 +1498,22 @@ export default function App() {
                   </div>
                 ) : (
                   <ReactFlow
-                    key={`${currentRepo?.id}-${roleFilter}-${visibleFileCount}-${graphExpanded}`}
+                    key={`${currentRepo?.id}-${roleFilter}-${visibleFileCount}-${graphExpanded}-${effectiveMapMode}-${focusLayerId ?? 'all'}`}
                     colorMode={theme}
                     nodes={flowNodes}
                     edges={flowEdges}
                     nodeTypes={nodeTypes}
                     onNodeClick={(_, node) => {
                       if (node.type === 'lane') return;
+                      if (node.type === 'layerSummary') {
+                        openLayerDetail(node.id);
+                        return;
+                      }
                       handleNavigateToFile(node.id);
                     }}
                     nodesConnectable={false}
                     fitView
-                    fitViewOptions={{ padding: 0.12 }}
+                    fitViewOptions={{ padding: 0.12, nodes: focusNodeIds }}
                     minZoom={0.15}
                     maxZoom={1.6}
                   >
@@ -1244,6 +1527,8 @@ export default function App() {
                         nodeColor={(n) =>
                           n.type === 'lane'
                             ? 'transparent'
+                            : n.type === 'layerSummary'
+                            ? String((n.data as LayerSummaryNodeData).color)
                             : citedFileMap.has(n.id)
                             ? '#10b981'
                             : n.id === selectedFilePath

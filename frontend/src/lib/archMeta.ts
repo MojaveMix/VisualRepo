@@ -395,6 +395,153 @@ export function layerOrder(tier: string): number {
   return idx === -1 ? LAYERS.length : idx;
 }
 
+/** "UserAccountService.java" -> "User Account Service", "vector_store.py" -> "Vector Store". */
+export function humanizeFileName(label: string): string {
+  const base = label.replace(/\.[^./]+$/, '');
+  return base
+    .replace(/[_\-.]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const ROLE_SUFFIX_WORDS = new Set([
+  'controller',
+  'router',
+  'routes',
+  'route',
+  'service',
+  'repository',
+  'repo',
+  'dao',
+  'store',
+  'entity',
+  'dto',
+  'model',
+  'client',
+  'api',
+  'config',
+  'configuration',
+  'test',
+  'tests',
+  'impl',
+]);
+
+function subjectOf(label: string): string {
+  const words = humanizeFileName(label).split(' ').filter(Boolean);
+  const kept = [...words];
+  while (kept.length > 1 && ROLE_SUFFIX_WORDS.has(kept[kept.length - 1].toLowerCase())) {
+    kept.pop();
+  }
+  return kept.join(' ') || humanizeFileName(label);
+}
+
+export interface FileBadge {
+  text: string;
+  tone: 'info' | 'warn' | 'good';
+  hint: string;
+}
+
+export interface FileInsight {
+  /** One short plain-English sentence describing what the file is for. */
+  purpose: string;
+  badges: FileBadge[];
+}
+
+const LARGE_FILE_LINES = 400;
+
+/**
+ * Derives a plain-English summary and review hints for a file card so developers can
+ * quickly understand what AI-generated code is for, without opening it.
+ * The purpose is inferred from the file's role and name (not by reading its code).
+ */
+export function describeFile(node: {
+  path: string;
+  label: string;
+  architecturalRole: string;
+  language?: string;
+  lineCount: number;
+  incomingCount: number;
+  outgoingCount: number;
+}): FileInsight {
+  const role = refineArchitecturalRole(node.path, node.architecturalRole, node.language);
+  const subject = subjectOf(node.label);
+  const lowerSubject = subject.toLowerCase();
+
+  let purpose: string;
+  switch (role) {
+    case 'CONTROLLER':
+      purpose = `Receives requests about ${lowerSubject} and sends back responses`;
+      break;
+    case 'SERVICE':
+      purpose = `Business logic for ${lowerSubject}`;
+      break;
+    case 'REPOSITORY':
+      purpose = `Saves and loads ${lowerSubject} data`;
+      break;
+    case 'MODEL':
+      purpose = `Defines the shape of ${lowerSubject} data`;
+      break;
+    case 'UI_COMPONENT':
+      purpose = `Screen or widget the user sees: ${lowerSubject}`;
+      break;
+    case 'API_CLIENT':
+      purpose = `Frontend code that talks to the backend (${lowerSubject})`;
+      break;
+    case 'CONFIG':
+      purpose = `Settings and wiring: ${lowerSubject}`;
+      break;
+    case 'TEST':
+      purpose = `Automated checks for ${lowerSubject}`;
+      break;
+    default:
+      purpose = `Helper code: ${lowerSubject}`;
+  }
+
+  const badges: FileBadge[] = [];
+  const isEntryRole = role === 'CONTROLLER' || role === 'UI_COMPONENT';
+
+  if (isEntryRole && node.incomingCount === 0 && node.outgoingCount > 0) {
+    badges.push({
+      text: 'Entry point',
+      tone: 'good',
+      hint: 'Nothing else in the repo calls this file, so it is where a flow begins.',
+    });
+  }
+
+  if (node.incomingCount >= 4) {
+    badges.push({
+      text: `Shared by ${node.incomingCount}`,
+      tone: 'info',
+      hint: `${node.incomingCount} files depend on this one. Changes here ripple widely, so review carefully.`,
+    });
+  }
+
+  const isIgnorableForUnused =
+    isEntryRole ||
+    role === 'CONFIG' ||
+    role === 'TEST' ||
+    /^(app|main|index|application|.*application|.*main)$/i.test(node.label.replace(/\.[^./]+$/, ''));
+  if (node.incomingCount === 0 && !isIgnorableForUnused) {
+    badges.push({
+      text: 'Not used yet',
+      tone: 'warn',
+      hint: 'No other file imports this one. It may be dead code the AI generated, or wired up dynamically.',
+    });
+  }
+
+  if (node.lineCount >= LARGE_FILE_LINES) {
+    badges.push({
+      text: 'Large file',
+      tone: 'warn',
+      hint: `${node.lineCount} lines. Big generated files are harder to review and often do too many things.`,
+    });
+  }
+
+  return { purpose, badges };
+}
+
 export const RELATION_LABELS: Record<string, string> = {
   IMPORT: 'imports',
   INJECTION: 'injects',

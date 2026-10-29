@@ -1,6 +1,6 @@
 import { ArrowLeft, ArrowRight, Code2, ShieldAlert, Zap } from 'lucide-react';
 import type { GraphNodeDto } from '../types/api';
-import { getRoleMeta, refineArchitecturalRole } from '../lib/archMeta';
+import { describeFile, getRoleMeta, refineArchitecturalRole } from '../lib/archMeta';
 import type { ImpactReport } from '../lib/impactAnalysis';
 
 interface ImpactSummaryCardProps {
@@ -92,7 +92,10 @@ export function ImpactSummaryCard({
 
       {!impactMode ? (
         <>
-          <p className="text-[11px] leading-snug text-slate-400">{role.description}</p>
+          <p className="text-[11px] leading-snug text-slate-400">
+            <span className="font-medium text-slate-200">{describeFile(node).purpose}.</span>{' '}
+            {role.description}
+          </p>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
             <div className="flex flex-wrap items-center gap-1">
               <span className="flex items-center gap-1 text-slate-400">
