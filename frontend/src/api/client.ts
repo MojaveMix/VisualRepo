@@ -2,6 +2,8 @@ import type {
   ArchitectureGraph,
   CitedAnswerResponse,
   ErDiagram,
+  InsightEngine,
+  ProjectInsights,
   RepositorySummary,
   SourceFileDetail,
   SourceFileSummary,
@@ -73,6 +75,18 @@ export const apiClient = {
 
   getErDiagram: (repoId: number) =>
     requestJson<ErDiagram>(`/repos/${repoId}/er-diagram`),
+
+  getProjectInsights: (
+    repoId: number,
+    engine: InsightEngine = 'algorithm',
+    model?: string,
+    refresh = false
+  ) => {
+    const params = new URLSearchParams({ engine });
+    if (model) params.set('model', model);
+    if (refresh) params.set('refresh', 'true');
+    return requestJson<ProjectInsights>(`/repos/${repoId}/insights?${params.toString()}`);
+  },
 
   askQuestion: (
     repoId: number,

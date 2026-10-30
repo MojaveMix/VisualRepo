@@ -4,6 +4,7 @@
 
 <br/>
 
+[![Live Demo](https://img.shields.io/badge/Live_Demo-visualrepo.netlify.app-00C7B7?style=for-the-badge&logo=netlify&logoColor=white)](https://visualrepo.netlify.app/)
 ![Java](https://img.shields.io/badge/Java-21-f89820?style=for-the-badge&logo=openjdk&logoColor=white)
 ![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.3-6db33f?style=for-the-badge&logo=springboot&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61dafb?style=for-the-badge&logo=react&logoColor=black)
@@ -13,7 +14,7 @@
 
 **Index a GitHub repo → see its architecture → ask questions → get answers with receipts.**
 
-[Quick Start](#-quick-start) · [Tech Stack](#-tech-stack) · [How It Works](#-how-it-works)
+[🌐 Live Website](https://visualrepo.netlify.app/) · [Quick Start](#-quick-start) · [Tech Stack](#-tech-stack) · [How It Works](#-how-it-works)
 
 </div>
 

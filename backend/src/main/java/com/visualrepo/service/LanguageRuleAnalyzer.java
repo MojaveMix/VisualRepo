@@ -337,13 +337,14 @@ public class LanguageRuleAnalyzer {
                         addUniqueEdge(edges, seenEdgeKeys, source.path(), targetPath, "IMPORT", extractLastSegment(imp, '.'));
                     }
                 }
-                // Check same-package sibling references in content
+                // Check same-package sibling references in content using strict word boundaries
                 if (!source.packageName().isBlank()) {
-                    String content = fileContentsByPath.getOrDefault(source.path(), "");
+                    String rawContent = fileContentsByPath.getOrDefault(source.path(), "");
+                    String stripped = stripCommentsAndStrings(rawContent);
                     for (AnalyzedFile sibling : javaPackageToFiles.getOrDefault(source.packageName(), List.of())) {
                         if (!sibling.path().equals(source.path())) {
                             String siblingClass = stripExtension(extractSimpleFilename(sibling.path()));
-                            if (content.contains(siblingClass)) {
+                            if (containsIdentifierToken(stripped, siblingClass)) {
                                 addUniqueEdge(edges, seenEdgeKeys, source.path(), sibling.path(), "INJECTION", siblingClass);
                             }
                         }
@@ -623,5 +624,22 @@ public class LanguageRuleAnalyzer {
     private String extractLastSegment(String text, char sep) {
         int idx = text.lastIndexOf(sep);
         return idx >= 0 ? text.substring(idx + 1) : text;
+    }
+
+    public static String stripCommentsAndStrings(String content) {
+        if (content == null || content.isEmpty()) {
+            return "";
+        }
+        String noBlockComments = content.replaceAll("(?s)/\\*.*?\\*/", " ");
+        String noLineComments = noBlockComments.replaceAll("(?m)//.*$", " ");
+        return noLineComments.replaceAll("\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'", "\"\"");
+    }
+
+    public static boolean containsIdentifierToken(String text, String identifier) {
+        if (text == null || identifier == null || identifier.isBlank()) {
+            return false;
+        }
+        Pattern p = Pattern.compile("\\b" + Pattern.quote(identifier) + "\\b");
+        return p.matcher(text).find();
     }
 }

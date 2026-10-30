@@ -185,4 +185,77 @@ public class ApiDtos {
             List<ErEntityDto> entities,
             List<ErRelationDto> relations
     ) {}
+
+    public record FileInsightDto(
+            String path,
+            String role,
+            String originalRole,
+            double confidence,
+            List<String> reasons,
+            String summary,
+            int clusterId,
+            double importance,
+            int depth,
+            boolean inCycle,
+            int fanIn,
+            int fanOut
+    ) {}
+
+    public record ModuleClusterDto(
+            int id,
+            String name,
+            List<String> files,
+            double cohesion,
+            String dominantRole
+    ) {}
+
+    public record DependencyCycleDto(
+            List<String> files
+    ) {}
+
+    public record LayerViolationDto(
+            String source,
+            String target,
+            String sourceRole,
+            String targetRole,
+            String reason
+    ) {}
+
+    public record PrunedEdgeDto(
+            String source,
+            String target,
+            String reason
+    ) {}
+
+    public record InferredErRelationDto(
+            String id,
+            String source,
+            String target,
+            String type,
+            String fieldName,
+            String joinColumn,
+            String joinTable,
+            double confidence,
+            String evidence,
+            String origin
+    ) {}
+
+    public record ProjectInsightsDto(
+            Long repositoryId,
+            String engine,
+            String modelUsed,
+            boolean aiAvailable,
+            Instant generatedAt,
+            String architectureStyle,
+            String overview,
+            List<FileInsightDto> files,
+            List<ModuleClusterDto> clusters,
+            List<DependencyCycleDto> cycles,
+            List<LayerViolationDto> violations,
+            List<PrunedEdgeDto> prunedEdges,
+            List<InferredErRelationDto> inferredRelations,
+            int reclassifiedCount,
+            double averageConfidence,
+            List<String> warnings
+    ) {}
 }

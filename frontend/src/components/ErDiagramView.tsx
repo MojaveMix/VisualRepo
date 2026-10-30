@@ -9,7 +9,7 @@ import {
   type Node,
 } from '@xyflow/react';
 import { Database } from 'lucide-react';
-import type { ErColumn, ErDiagram, ErEntity } from '../types/api';
+import type { ErColumn, ErDiagram, ErEntity, InferredErRelationDto } from '../types/api';
 import { ErTableNode, type ErTableNodeData } from './ErTableNode';
 import { CARDINALITY, edgeSides, layoutEntities } from '../lib/erLayout';
 import { useTheme } from '../lib/theme';
@@ -18,6 +18,7 @@ const nodeTypes = { erTable: ErTableNode };
 
 interface ErDiagramViewProps {
   diagram: ErDiagram | null;
+  inferredById?: Map<string, InferredErRelationDto>;
   /** True once the request has finished (so `diagram === null` means it failed). */
   loaded: boolean;
   query: string;
@@ -41,6 +42,7 @@ function Message({ title, text }: { title: string; text: string }) {
 /** Database diagram (tables, columns and relationships) built from the repository's JPA entities. */
 export function ErDiagramView({
   diagram,
+  inferredById,
   loaded,
   query,
   selectedEntityId,
@@ -105,13 +107,23 @@ export function ErDiagramView({
         layout.rows.get(r.target) ?? 0
       );
       const connected = r.source === selectedEntityId || r.target === selectedEntityId;
-      const color = connected
+      const inferred = inferredById?.get(r.id);
+      const color = inferred
+        ? connected
+          ? '#34d399'
+          : '#10b981'
+        : connected
         ? isDark
           ? '#818cf8'
           : '#4f46e5'
         : isDark
         ? '#64748b'
         : '#94a3b8';
+      const label = inferred
+        ? `${CARDINALITY[r.type]} · ${inferred.origin === 'ollama' ? 'AI' : 'Algo'} ${Math.round(
+            inferred.confidence * 100
+          )}%`
+        : CARDINALITY[r.type];
       return {
         id: r.id,
         source: r.source,
@@ -119,10 +131,10 @@ export function ErDiagramView({
         sourceHandle: `${sourceSide}-source`,
         targetHandle: `${targetSide}-target`,
         type: 'smoothstep',
-        label: CARDINALITY[r.type],
-        animated: connected,
+        label,
+        animated: connected || Boolean(inferred),
         labelStyle: {
-          fill: isDark ? '#e2e8f0' : '#0f172a',
+          fill: inferred ? (isDark ? '#6ee7b7' : '#047857') : isDark ? '#e2e8f0' : '#0f172a',
           fontSize: 10,
           fontWeight: 700,
         },
@@ -134,8 +146,8 @@ export function ErDiagramView({
         labelBgBorderRadius: 4,
         style: {
           stroke: color,
-          strokeWidth: connected ? 2.4 : 1.6,
-          strokeDasharray: r.type === 'MANY_TO_MANY' ? '6 4' : undefined,
+          strokeWidth: connected ? 2.4 : inferred ? 2.0 : 1.6,
+          strokeDasharray: r.type === 'MANY_TO_MANY' || inferred ? '6 4' : undefined,
           opacity: hasFocus && !connected ? 0.3 : 1,
         },
         markerEnd: { type: MarkerType.ArrowClosed, color },
@@ -143,7 +155,7 @@ export function ErDiagramView({
     });
 
     return { nodes, edges };
-  }, [diagram, query, selectedEntityId, highlightedColumn, onSelectColumn, isDark]);
+  }, [diagram, inferredById, query, selectedEntityId, highlightedColumn, onSelectColumn, isDark]);
 
   if (!loaded) {
     return (

@@ -42,6 +42,7 @@ import {
   Layers,
   Eye,
   EyeOff,
+  Box,
 } from 'lucide-react';
 import { apiClient } from './api/client';
 import type {
@@ -51,6 +52,8 @@ import type {
   ErColumn,
   ErDiagram,
   ErEntity,
+  InsightEngine,
+  ProjectInsights,
   RepositorySummary,
   SourceFileDetail,
   SourceFileSummary,
@@ -61,6 +64,8 @@ import { LaneNode, type LaneNodeData } from './components/LaneNode';
 import { LayerSummaryNode, type LayerSummaryNodeData } from './components/LayerSummaryNode';
 import { ErDiagramView } from './components/ErDiagramView';
 import { ErEntitySummaryCard } from './components/ErEntitySummaryCard';
+import { Relational3DView } from './components/Relational3DView';
+import { DeepInsightsBar } from './components/DeepInsightsBar';
 import { ImpactSummaryCard } from './components/ImpactSummaryCard';
 import { EvidenceInspector } from './components/EvidenceInspector';
 import { CitedAiPanel } from './components/CitedAiPanel';
@@ -77,6 +82,12 @@ import {
   relationLabel,
   resolveNodeLayerKey,
 } from './lib/archMeta';
+import {
+  applyInsightsToErDiagram,
+  applyInsightsToGraph,
+  computeClientSideInsights,
+  getClusterColor,
+} from './lib/deepInsightsClient';
 import { computeImpactReport } from './lib/impactAnalysis';
 import { archEdgeSides, layoutGraph, layoutOverview, OVERVIEW_NODE_HEIGHT, OVERVIEW_NODE_WIDTH } from './lib/layout';
 import { useTheme } from './lib/theme';
@@ -185,10 +196,18 @@ export default function App() {
   const [booting, setBooting] = useState(true);
 
   const [files, setFiles] = useState<SourceFileSummary[]>([]);
-  const [graphData, setGraphData] = useState<ArchitectureGraph | null>(null);
-  const [erDiagram, setErDiagram] = useState<ErDiagram | null>(null);
+  const [rawGraphData, setRawGraphData] = useState<ArchitectureGraph | null>(null);
+  const [rawErDiagram, setRawErDiagram] = useState<ErDiagram | null>(null);
   const [erLoaded, setErLoaded] = useState(false);
   const [history, setHistory] = useState<CitedAnswerResponse[]>([]);
+
+  // Deep Architecture & ER Insights (Algorithm | Ollama AI Local)
+  const [insightEngine, setInsightEngine] = useState<InsightEngine>('algorithm');
+  const [insightModel, setInsightModel] = useState<string>('');
+  const [backendInsights, setBackendInsights] = useState<ProjectInsights | null>(null);
+  const [loadingInsights, setLoadingInsights] = useState(false);
+  const [activeClusterId, setActiveClusterId] = useState<number | null>(null);
+  const [showInferredEr, setShowInferredEr] = useState(true);
 
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [fileDetail, setFileDetail] = useState<SourceFileDetail | null>(null);
@@ -205,7 +224,7 @@ export default function App() {
     reason?: string;
   } | null>(null);
 
-  const [leftView, setLeftView] = useState<'graph' | 'er' | 'tree'>('graph');
+  const [leftView, setLeftView] = useState<'graph' | '3d' | 'er' | 'tree'>('graph');
   // 'overview' = one card per architectural layer (the big picture); 'detail' = every file.
   const [mapMode, setMapMode] = useState<'overview' | 'detail'>('overview');
   // When set (in detail mode), the camera zooms to this layer's lane on load.
@@ -553,51 +572,78 @@ export default function App() {
     [mainPanes, normalizedMainWidths]
   );
 
-  const loadWorkspaceData = useCallback(async (repo: RepositorySummary) => {
-    setErrorBanner(null);
-    setErLoaded(false);
-    try {
-      const [fileList, graph, hist, er] = await Promise.all([
-        apiClient.listFiles(repo.id),
-        apiClient.getArchitectureGraph(repo.id),
-        apiClient.getAnalysisHistory(repo.id),
-        apiClient.getErDiagram(repo.id).catch(() => null),
-      ]);
-      setFiles(fileList);
-      setGraphData(graph);
-      setHistory(hist);
-      setErDiagram(er);
-      setErLoaded(true);
-      setRoleFilter('ALL');
-      setMapMode('overview');
-      setFocusLayerId(null);
-      setShowAllEdges(null);
-      setFileSearch('');
-      setHighlightedColumn(null);
-      setSelectedEntityId(er && er.entities.length > 0 ? er.entities[0].id : null);
-
-      if (hist.length > 0 && hist[0].citations.length > 0) {
-        const firstCit = hist[0].citations[0];
-        setActiveCitation(firstCit);
-        setSelectedFilePath(firstCit.filePath);
-        setHighlightedRange({
-          startLine: firstCit.startLine,
-          endLine: firstCit.endLine,
-          label: firstCit.symbolName,
-          reason: firstCit.reason,
-        });
-      } else if (fileList.length > 0) {
-        const preferred =
-          fileList.find((f) => f.architecturalRole === 'CONTROLLER') || fileList[0];
-        setActiveCitation(null);
-        setHighlightedRange(null);
-        setSelectedFilePath(preferred.path);
+  const loadDeepInsights = useCallback(
+    async (repoId: number, engine: InsightEngine, model?: string, refresh = false) => {
+      setLoadingInsights(true);
+      try {
+        const res = await apiClient.getProjectInsights(
+          repoId,
+          engine,
+          model || undefined,
+          refresh
+        );
+        setBackendInsights(res);
+      } catch {
+        // Client-side deep insights fallback remains active if the endpoint is unreachable
+      } finally {
+        setLoadingInsights(false);
       }
-    } catch (err) {
-      setErLoaded(true);
-      setErrorBanner(err instanceof Error ? err.message : 'Failed to load repository workspace');
-    }
-  }, []);
+    },
+    []
+  );
+
+  const loadWorkspaceData = useCallback(
+    async (repo: RepositorySummary) => {
+      setErrorBanner(null);
+      setErLoaded(false);
+      setBackendInsights(null);
+      setActiveClusterId(null);
+      try {
+        const [fileList, graph, hist, er] = await Promise.all([
+          apiClient.listFiles(repo.id),
+          apiClient.getArchitectureGraph(repo.id),
+          apiClient.getAnalysisHistory(repo.id),
+          apiClient.getErDiagram(repo.id).catch(() => null),
+        ]);
+        setFiles(fileList);
+        setRawGraphData(graph);
+        setHistory(hist);
+        setRawErDiagram(er);
+        setErLoaded(true);
+        setRoleFilter('ALL');
+        setMapMode('overview');
+        setFocusLayerId(null);
+        setShowAllEdges(null);
+        setFileSearch('');
+        setHighlightedColumn(null);
+        setSelectedEntityId(er && er.entities.length > 0 ? er.entities[0].id : null);
+
+        void loadDeepInsights(repo.id, insightEngine, insightModel, false);
+
+        if (hist.length > 0 && hist[0].citations.length > 0) {
+          const firstCit = hist[0].citations[0];
+          setActiveCitation(firstCit);
+          setSelectedFilePath(firstCit.filePath);
+          setHighlightedRange({
+            startLine: firstCit.startLine,
+            endLine: firstCit.endLine,
+            label: firstCit.symbolName,
+            reason: firstCit.reason,
+          });
+        } else if (fileList.length > 0) {
+          const preferred =
+            fileList.find((f) => f.architecturalRole === 'CONTROLLER') || fileList[0];
+          setActiveCitation(null);
+          setHighlightedRange(null);
+          setSelectedFilePath(preferred.path);
+        }
+      } catch (err) {
+        setErLoaded(true);
+        setErrorBanner(err instanceof Error ? err.message : 'Failed to load repository workspace');
+      }
+    },
+    [insightEngine, insightModel, loadDeepInsights]
+  );
 
   const bootstrap = useCallback(async () => {
     try {
@@ -606,6 +652,11 @@ export default function App() {
         apiClient.listRepositories(),
       ]);
       setSystemStatus(status);
+      if (status.configuredChatModel) {
+        setInsightModel(status.configuredChatModel);
+      } else if (status.availableOllamaModels.length > 0) {
+        setInsightModel(status.availableOllamaModels[0]);
+      }
       setRepos(repoList);
       if (repoList.length > 0) {
         setCurrentRepo(repoList[0]);
@@ -754,15 +805,15 @@ export default function App() {
       setActiveCitation(null);
       setHighlightedRange(null);
       setSelectedFilePath(filePath);
-      if (erDiagram) {
-        const match = erDiagram.entities.find((e) => e.filePath === filePath);
+      if (rawErDiagram) {
+        const match = rawErDiagram.entities.find((e) => e.filePath === filePath);
         if (match) {
           setSelectedEntityId(match.id);
           setHighlightedColumn(null);
         }
       }
     },
-    [erDiagram]
+    [rawErDiagram]
   );
 
   const handleSelectEntity = useCallback((entity: ErEntity) => {
@@ -791,6 +842,56 @@ export default function App() {
       reason: `Column '${column.name}' (${column.sqlType}${column.primaryKey ? ', PRIMARY KEY' : ''}${fkDetail}) defined by field '${column.fieldName}'.`,
     });
   }, []);
+
+  // Deep insights: backend result (algorithm or ollama) with instant client-side fallback
+  const clientFallbackInsights = useMemo(
+    () => computeClientSideInsights(rawGraphData, rawErDiagram),
+    [rawGraphData, rawErDiagram]
+  );
+
+  const effectiveInsights = backendInsights ?? clientFallbackInsights;
+
+  const {
+    graph: graphData,
+    fileInsightMap,
+    clusterMap,
+    violationEdgeKeys,
+    violationMap,
+  } = useMemo(
+    () => applyInsightsToGraph(rawGraphData, effectiveInsights),
+    [rawGraphData, effectiveInsights]
+  );
+
+  const { diagram: erDiagram, inferredById: inferredErMap } = useMemo(
+    () => applyInsightsToErDiagram(rawErDiagram, effectiveInsights, showInferredEr),
+    [rawErDiagram, effectiveInsights, showInferredEr]
+  );
+
+  const handleEngineChange = useCallback(
+    (nextEngine: InsightEngine) => {
+      setInsightEngine(nextEngine);
+      if (currentRepo) {
+        void loadDeepInsights(currentRepo.id, nextEngine, insightModel, false);
+      }
+    },
+    [currentRepo, insightModel, loadDeepInsights]
+  );
+
+  const handleModelChange = useCallback(
+    (nextModel: string) => {
+      setInsightModel(nextModel);
+      if (currentRepo && insightEngine === 'ollama') {
+        void loadDeepInsights(currentRepo.id, 'ollama', nextModel, false);
+      }
+    },
+    [currentRepo, insightEngine, loadDeepInsights]
+  );
+
+  const handleRefreshInsights = useCallback(() => {
+    if (currentRepo) {
+      void loadDeepInsights(currentRepo.id, insightEngine, insightModel, true);
+    }
+  }, [currentRepo, insightEngine, insightModel, loadDeepInsights]);
 
   // Set of all file paths cited in the latest answer so React Flow highlights them
   const citedFileMap = useMemo(() => {
@@ -821,8 +922,9 @@ export default function App() {
     [erDiagram, selectedEntityId]
   );
 
-  // Searching for a file/function only makes sense on the detailed map.
-  const effectiveMapMode: 'overview' | 'detail' = fileSearch.trim() ? 'detail' : mapMode;
+  // Searching for a file/function or isolating a module cluster switches to the detailed map.
+  const effectiveMapMode: 'overview' | 'detail' =
+    fileSearch.trim() || activeClusterId !== null ? 'detail' : mapMode;
   const edgeCount = graphData?.edges.length ?? 0;
   const effectiveShowAllEdges = showAllEdges ?? edgeCount <= AUTO_SHOW_ALL_EDGES_LIMIT;
 
@@ -838,11 +940,13 @@ export default function App() {
 
     const query = fileSearch.trim().toLowerCase();
     const visible = graphData.nodes
-      .filter(
-        (n) =>
-          roleFilter === 'ALL' ||
-          refineArchitecturalRole(n.path, n.architecturalRole, n.language) === roleFilter
-      )
+      .filter((n) => {
+        const fi = fileInsightMap.get(n.path);
+        const effRole = fi?.role ?? refineArchitecturalRole(n.path, n.architecturalRole, n.language);
+        if (roleFilter !== 'ALL' && effRole !== roleFilter) return false;
+        if (activeClusterId !== null && fi && fi.clusterId !== activeClusterId) return false;
+        return true;
+      })
       .filter(
         (n) =>
           !query ||
@@ -1031,13 +1135,15 @@ export default function App() {
           ? 'upstream'
           : null;
       const impactHops = impactKind === 'downstream' ? dHop : impactKind === 'upstream' ? uHop : undefined;
+      const fi = fileInsightMap.get(n.path);
+      const cluster = fi ? clusterMap.get(fi.clusterId) : undefined;
 
       const data: ArchNodeData = {
         path: n.path,
         label: n.label,
         directory: n.directory,
         language: n.language,
-        architecturalRole: refineArchitecturalRole(n.path, n.architecturalRole, n.language),
+        architecturalRole: fi?.role ?? refineArchitecturalRole(n.path, n.architecturalRole, n.language),
         tier: n.tier,
         lineCount: n.lineCount,
         symbols: n.symbols,
@@ -1049,6 +1155,13 @@ export default function App() {
         citationLines: citedFileMap.get(n.path),
         impactKind,
         impactHops,
+        deepSummary: fi?.summary,
+        confidence: fi?.confidence,
+        importance: fi?.importance,
+        clusterName: cluster?.name,
+        clusterColor: fi ? getClusterColor(fi.clusterId) : undefined,
+        inCycle: fi?.inCycle,
+        reasons: fi?.reasons,
       };
       return {
         id: n.id,
@@ -1082,14 +1195,18 @@ export default function App() {
           (e.source === selectedFilePath || upHops.has(e.source)) &&
           upHops.has(e.target);
 
+        const edgeKey = `${e.source}->${e.target}`;
+        const isViolation = violationEdgeKeys.has(edgeKey);
         const isConnected =
-          isDirectOutgoing || isDirectIncoming || isDownstreamChain || isUpstreamChain;
+          isDirectOutgoing || isDirectIncoming || isDownstreamChain || isUpstreamChain || isViolation;
         const isApiCall = e.relationType === 'API_CALL';
 
         // On big repos, hide arrows that are not tied to the selected file to avoid a hairball.
         if (!effectiveShowAllEdges && hasFocus && !isConnected) return [];
 
-        const color = isDownstreamChain
+        const color = isViolation
+          ? '#f43f5e'
+          : isDownstreamChain
           ? isDirectIncoming
             ? isDark
               ? '#fb7185'
@@ -1121,10 +1238,14 @@ export default function App() {
             sourceHandle: `${sourceSide}-source`,
             targetHandle: `${targetSide}-target`,
             type: 'smoothstep',
-            label: isConnected ? relationLabel(e.relationType) : undefined,
+            label: isViolation
+              ? '⚠ layer violation'
+              : isConnected
+              ? relationLabel(e.relationType)
+              : undefined,
             animated: isConnected,
             labelStyle: {
-              fill: isDark ? '#e2e8f0' : '#0f172a',
+              fill: isViolation ? '#fda4af' : isDark ? '#e2e8f0' : '#0f172a',
               fontSize: 10,
               fontWeight: 600,
             },
@@ -1137,7 +1258,7 @@ export default function App() {
             style: {
               stroke: color,
               strokeWidth: isConnected ? 2.4 : 1.4,
-              strokeDasharray: isApiCall ? '6 4' : undefined,
+              strokeDasharray: isApiCall || isViolation ? '6 4' : undefined,
               opacity: hasFocus && !isConnected ? 0.25 : 1,
             },
             markerEnd: { type: MarkerType.ArrowClosed, color },
@@ -1164,6 +1285,10 @@ export default function App() {
     };
   }, [
     graphData,
+    fileInsightMap,
+    clusterMap,
+    violationEdgeKeys,
+    activeClusterId,
     roleFilter,
     fileSearch,
     selectedFilePath,
@@ -1249,10 +1374,18 @@ export default function App() {
         <>
           <PaneHeader
             step={stepNumber}
-            title={leftView === 'er' ? 'Database ER diagram' : 'Architecture & Impact'}
+            title={
+              leftView === 'er'
+                ? 'Database ER diagram'
+                : leftView === '3d'
+                ? '3D Relational Architecture & DB'
+                : 'Architecture & Impact'
+            }
             subtitle={
               leftView === 'er'
-                ? 'Tables, columns, primary/foreign keys and relationships'
+                ? 'Tables, columns, primary/foreign keys and AI/algorithm inferred relationships'
+                : leftView === '3d'
+                ? 'Interactive Three.js 3D layers, module clusters, request flow pulse & database tables'
                 : impactMode
                 ? 'Blast radius: highlighting every file affected if the selected file changes'
                 : effectiveMapMode === 'overview'
@@ -1263,7 +1396,7 @@ export default function App() {
             actions={
               leftView !== 'tree' ? (
                 <div className="flex items-center gap-1.5">
-                  {leftView === 'graph' && (
+                  {(leftView === 'graph' || leftView === '3d') && (
                     <button
                       onClick={() => setImpactMode((v) => !v)}
                       className={`inline-flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition ${
@@ -1331,6 +1464,30 @@ export default function App() {
             </div>
           )}
 
+          {/* Deep Architecture & ER Intelligence Bar (Algorithm | Ollama AI Local) */}
+          <DeepInsightsBar
+            insights={effectiveInsights}
+            engine={insightEngine}
+            selectedModel={insightModel}
+            loading={loadingInsights}
+            systemStatus={systemStatus}
+            activeClusterId={activeClusterId}
+            showInferredEr={showInferredEr}
+            onChangeEngine={handleEngineChange}
+            onChangeModel={handleModelChange}
+            onRefresh={handleRefreshInsights}
+            onSelectCluster={setActiveClusterId}
+            onToggleInferredEr={() => setShowInferredEr((v) => !v)}
+            onSelectFile={handleNavigateToFile}
+            onSelectEntityById={(entityId) => {
+              const found = erDiagram?.entities.find((e) => e.id === entityId);
+              if (found) {
+                setLeftView('er');
+                handleSelectEntity(found);
+              }
+            }}
+          />
+
           {/* Toolbar */}
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-900/70 px-3 py-2">
             <div className="flex rounded-lg border border-slate-800 bg-slate-950 p-0.5 text-[11px]">
@@ -1344,6 +1501,18 @@ export default function App() {
               >
                 <Network className="h-3.5 w-3.5" />
                 Map ({visibleFileCount})
+              </button>
+              <button
+                onClick={() => setLeftView('3d')}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium transition ${
+                  leftView === '3d'
+                    ? 'bg-gradient-to-r from-indigo-600 to-cyan-600 text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Interactive Three.js 3D Relational Architecture, Module Clusters & Database ER Explorer"
+              >
+                <Box className="h-3.5 w-3.5" />
+                3D Relational
               </button>
               <button
                 onClick={() => setLeftView('er')}
@@ -1546,9 +1715,30 @@ export default function App() {
                   </ReactFlow>
                 )}
               </>
+            ) : leftView === '3d' ? (
+              <Relational3DView
+                graphData={graphData}
+                erDiagram={erDiagram}
+                fileInsightMap={fileInsightMap}
+                clusterMap={clusterMap}
+                violationEdgeKeys={violationEdgeKeys}
+                violationMap={violationMap}
+                inferredErMap={inferredErMap}
+                citedFileMap={citedFileMap}
+                impactReport={impactReport}
+                impactMode={impactMode}
+                selectedFilePath={selectedFilePath}
+                selectedEntityId={selectedEntityId}
+                activeClusterId={activeClusterId}
+                query={fileSearch}
+                roleFilter={roleFilter}
+                onSelectFile={handleNavigateToFile}
+                onSelectEntity={handleSelectEntity}
+              />
             ) : leftView === 'er' ? (
               <ErDiagramView
                 diagram={erDiagram}
+                inferredById={inferredErMap}
                 loaded={erLoaded}
                 query={fileSearch}
                 selectedEntityId={selectedEntityId}
@@ -1567,8 +1757,9 @@ export default function App() {
                 {filteredFiles.map((f) => {
                   const isSelected = f.path === selectedFilePath;
                   const isCited = citedFileMap.has(f.path);
+                  const fi = fileInsightMap.get(f.path);
                   const role = getRoleMeta(
-                    refineArchitecturalRole(f.path, f.architecturalRole, f.language)
+                    fi?.role ?? refineArchitecturalRole(f.path, f.architecturalRole, f.language)
                   );
                   const RoleIcon = role.icon;
                   return (
@@ -1621,6 +1812,7 @@ export default function App() {
             <ErEntitySummaryCard
               entity={selectedErEntity}
               diagram={erDiagram}
+              inferredById={inferredErMap}
               expanded={graphExpanded}
               onSelectEntityById={(id) => {
                 const found = erDiagram.entities.find((e) => e.id === id);

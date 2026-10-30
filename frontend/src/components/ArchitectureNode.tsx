@@ -20,6 +20,13 @@ export interface ArchNodeData extends Record<string, unknown> {
   citationLines?: string;
   impactKind?: 'downstream' | 'upstream' | null;
   impactHops?: number;
+  deepSummary?: string;
+  confidence?: number;
+  importance?: number;
+  clusterName?: string;
+  clusterColor?: string;
+  inCycle?: boolean;
+  reasons?: string[];
 }
 
 const SIDES: { side: string; position: Position }[] = [
@@ -81,9 +88,27 @@ export function ArchitectureNode({ data }: NodeProps) {
         <Sparkles className="h-2.5 w-2.5" />
         Cited by AI{d.citationLines ? ` · ${d.citationLines}` : ''}
       </span>
+    ) : d.inCycle ? (
+      <span
+        className="absolute -top-2.5 right-2 z-10 inline-flex items-center gap-1 rounded-full border border-rose-500/50 bg-rose-950 px-2 py-0.5 text-[9px] font-bold text-rose-200 shadow"
+        title="Part of a circular dependency cycle (Tarjan SCC)"
+      >
+        <AlertTriangle className="h-2.5 w-2.5" />
+        Circular cycle
+      </span>
+    ) : (d.importance ?? 0) >= 0.82 ? (
+      <span
+        className="absolute -top-2.5 right-2 z-10 inline-flex items-center gap-1 rounded-full border border-indigo-500/50 bg-indigo-950 px-2 py-0.5 text-[9px] font-bold text-indigo-200 shadow"
+        title={`Core architectural hub (PageRank centrality ${Math.round((d.importance ?? 0) * 100)}%)`}
+      >
+        ★ Core Hub
+      </span>
     ) : null;
 
-  const tooltip = `${d.path}\n${d.language} · ${d.lineCount} lines\n${insight.purpose} (inferred from the file name and location)`;
+  const purposeText = d.deepSummary || insight.purpose;
+  const reasonLine = d.reasons && d.reasons.length > 0 ? `\nWhy: ${d.reasons.join(' · ')}` : '';
+  const clusterLine = d.clusterName ? `\nCluster: ${d.clusterName}` : '';
+  const tooltip = `${d.path}\n${d.language} · ${d.lineCount} lines${clusterLine}\n${purposeText}${reasonLine}`;
 
   return (
     <div
@@ -120,6 +145,13 @@ export function ArchitectureNode({ data }: NodeProps) {
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13px] font-semibold leading-tight text-slate-100">{d.label}</div>
           <div className="flex items-center gap-1 truncate text-[10px] font-medium uppercase tracking-wider text-slate-400">
+            {d.clusterColor && (
+              <span
+                className="h-2 w-2 shrink-0 rounded-full"
+                style={{ backgroundColor: d.clusterColor }}
+                title={d.clusterName}
+              />
+            )}
             <span className="truncate">{role.label}</span>
             <span className="text-slate-600">·</span>
             <span className="shrink-0 normal-case tracking-normal text-slate-500">{d.lineCount} lines</span>
@@ -128,7 +160,7 @@ export function ArchitectureNode({ data }: NodeProps) {
       </div>
 
       <p className="mt-2 line-clamp-2 h-[30px] text-[11px] leading-[15px] text-slate-300">
-        {insight.purpose}
+        {purposeText}
       </p>
 
       <div className="mt-1.5 flex h-[18px] items-center gap-1 overflow-hidden">

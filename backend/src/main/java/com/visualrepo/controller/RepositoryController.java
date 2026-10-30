@@ -2,6 +2,7 @@ package com.visualrepo.controller;
 
 import com.visualrepo.dto.ApiDtos.*;
 import com.visualrepo.service.ErDiagramService;
+import com.visualrepo.service.ProjectInsightService;
 import com.visualrepo.service.RepositoryAnalysisService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -17,10 +18,16 @@ public class RepositoryController {
 
     private final RepositoryAnalysisService analysisService;
     private final ErDiagramService erDiagramService;
+    private final ProjectInsightService projectInsightService;
 
-    public RepositoryController(RepositoryAnalysisService analysisService, ErDiagramService erDiagramService) {
+    public RepositoryController(
+            RepositoryAnalysisService analysisService,
+            ErDiagramService erDiagramService,
+            ProjectInsightService projectInsightService
+    ) {
         this.analysisService = analysisService;
         this.erDiagramService = erDiagramService;
+        this.projectInsightService = projectInsightService;
     }
 
     @GetMapping("/system/status")
@@ -72,6 +79,16 @@ public class RepositoryController {
     @GetMapping("/repos/{id}/er-diagram")
     public ErDiagramDto getErDiagram(@PathVariable Long id) {
         return erDiagramService.getErDiagram(id);
+    }
+
+    @GetMapping("/repos/{id}/insights")
+    public ProjectInsightsDto getProjectInsights(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "algorithm") String engine,
+            @RequestParam(required = false) String model,
+            @RequestParam(defaultValue = "false") boolean refresh
+    ) {
+        return projectInsightService.getProjectInsights(id, engine, model, refresh);
     }
 
     @PostMapping("/repos/{id}/ask")

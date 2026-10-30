@@ -1,10 +1,11 @@
-import { Code2, KeyRound, Link2, Table2 } from 'lucide-react';
-import type { ErDiagram, ErEntity } from '../types/api';
+import { Code2, KeyRound, Link2, Sparkles, Table2 } from 'lucide-react';
+import type { ErDiagram, ErEntity, InferredErRelationDto } from '../types/api';
 import { CARDINALITY, describeRelation } from '../lib/erLayout';
 
 interface ErEntitySummaryCardProps {
   entity: ErEntity;
   diagram: ErDiagram;
+  inferredById?: Map<string, InferredErRelationDto>;
   expanded: boolean;
   onSelectEntityById: (id: string) => void;
   onExitExpanded: () => void;
@@ -13,6 +14,7 @@ interface ErEntitySummaryCardProps {
 export function ErEntitySummaryCard({
   entity,
   diagram,
+  inferredById,
   expanded,
   onSelectEntityById,
   onExitExpanded,
@@ -78,11 +80,22 @@ export function ErEntitySummaryCard({
           {relations.map((r) => {
             const otherId = r.source === entity.id ? r.target : r.source;
             const other = byId.get(otherId);
+            const inferred = inferredById?.get(r.id);
             return (
               <li key={r.id} className="flex flex-wrap items-center gap-1.5">
                 <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 font-mono text-[10px] font-bold text-indigo-300">
                   {CARDINALITY[r.type]}
                 </span>
+                {inferred && (
+                  <span
+                    className="inline-flex items-center gap-0.5 rounded border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-300"
+                    title={inferred.evidence}
+                  >
+                    <Sparkles className="h-2.5 w-2.5" />
+                    {inferred.origin === 'ollama' ? 'Ollama AI' : 'Algo'} ·{' '}
+                    {Math.round(inferred.confidence * 100)}%
+                  </span>
+                )}
                 <span>{describeRelation(r, entity.id, nameOf)}</span>
                 {other && (
                   <button

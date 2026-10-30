@@ -158,3 +158,87 @@ export interface ErDiagram {
   entities: ErEntity[];
   relations: ErRelation[];
 }
+
+// ---------------------------------------------------------------------------
+// Deep project insights (GET /api/repos/{id}/insights?engine=algorithm|ollama)
+// ---------------------------------------------------------------------------
+
+export type InsightEngine = 'algorithm' | 'ollama';
+
+export interface FileInsightDto {
+  path: string;
+  /** Refined role: UI_COMPONENT | API_CLIENT | CONTROLLER | SERVICE | REPOSITORY | MODEL | MODULE | CONFIG | TEST */
+  role: string;
+  /** Role assigned at indexing time (heuristic). */
+  originalRole: string;
+  /** 0..1 confidence of the refined role. */
+  confidence: number;
+  /** Human-readable evidence behind the refined role. */
+  reasons: string[];
+  /** One-sentence plain-English purpose of the file. */
+  summary: string;
+  /** Id of the module cluster (community) this file belongs to. */
+  clusterId: number;
+  /** PageRank-style importance, normalized to 0..1 (1 = most central file). */
+  importance: number;
+  /** Topological depth from entry points (0 = entry point). */
+  depth: number;
+  inCycle: boolean;
+  fanIn: number;
+  fanOut: number;
+}
+
+export interface ModuleClusterDto {
+  id: number;
+  name: string;
+  files: string[];
+  /** Ratio of internal edges vs. all edges touching the cluster (0..1). */
+  cohesion: number;
+  dominantRole: string;
+}
+
+export interface DependencyCycleDto {
+  files: string[];
+}
+
+export interface LayerViolationDto {
+  source: string;
+  target: string;
+  sourceRole: string;
+  targetRole: string;
+  reason: string;
+}
+
+export interface PrunedEdgeDto {
+  source: string;
+  target: string;
+  reason: string;
+}
+
+export interface InferredErRelationDto extends ErRelation {
+  confidence: number;
+  evidence: string;
+  /** 'algorithm' | 'ollama' */
+  origin: string;
+}
+
+export interface ProjectInsights {
+  repositoryId: number;
+  engine: InsightEngine;
+  modelUsed: string;
+  aiAvailable: boolean;
+  generatedAt: string;
+  /** e.g. "Layered (Controller → Service → Repository)", "React SPA + REST backend". */
+  architectureStyle: string;
+  /** Short multi-sentence description of the project architecture. */
+  overview: string;
+  files: FileInsightDto[];
+  clusters: ModuleClusterDto[];
+  cycles: DependencyCycleDto[];
+  violations: LayerViolationDto[];
+  prunedEdges: PrunedEdgeDto[];
+  inferredRelations: InferredErRelationDto[];
+  reclassifiedCount: number;
+  averageConfidence: number;
+  warnings: string[];
+}
